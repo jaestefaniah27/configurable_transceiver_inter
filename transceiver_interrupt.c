@@ -55,9 +55,6 @@ void transceiver_interrupt_init(void) {
     *ier = 0x3;    // Habilita entradas 0 (TX_RDY) y 1 (EMPTY)
     *mer = 0x3;    // Habilita interrupciones globales y locales
 
-    //write_reg(INTC_IER_OFFSET, (1 << INTR_RX_BIT) | (1 << INTR_TX_BIT));
-    //write_reg(INTC_MER_OFFSET, 0x3); // ME = 1, HIE = 1
-    //rtems_interrupt_catch(interrupt_service_routine, 0x10, NULL); // Vector 0x10 como en IVAR_RST_VAL
     rtems_interrupt_handler_install(IRQ_ID_PL_PS_IRQ0, "TX_RDY_IRQ", RTEMS_INTERRUPT_UNIQUE, 
         interrupt_service_routine, NULL );
 }
