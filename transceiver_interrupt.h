@@ -16,8 +16,10 @@ void transceiver_interrupt_init(void);
  * @brief Registra el callback para interrupción de recepción.
  * @param cb Función que se llama cuando RX genera una interrupción.
  */
-void transceiver_register_rx_callback(void (*cb)(void));
+void transceiver_register_rx_worker_id(rtems_id task_id);
 
+/* Función para habilitar/deshabilitar interrupción RX (Usada por el Worker) */
+void transceiver_int_enable_rx(bool enable);
 /**
  * @brief Registra el callback para interrupción de transmisión.
  * @param cb Función que se llama cuando TX genera una interrupción.

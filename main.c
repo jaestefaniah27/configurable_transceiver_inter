@@ -80,12 +80,27 @@ static void start_tx_task(void) {
     printf("ERR: tx_task start %d\n", (int)sc);
   }
 }
-/* Callback sencillo: imprime en stdout los bytes recibidos */
-static void my_rx_cb(const uint8_t *data, size_t len, void *arg) {
-  (void)arg;
-  /* imprimir como texto (si son ASCII) */
-  fwrite(data, 1, len, stdout);
-  fflush(stdout);
+
+/* Callback: Se llama desde el Worker cuando hay datos nuevos */
+static void my_rx_notification_cb(const uint8_t *ignored_data, size_t ignored_len, void *arg) {
+    (void)ignored_data; (void)ignored_len; (void)arg;
+    
+    uint8_t buf[128];
+    size_t n;
+
+    /* Bucle para vaciar el buffer completamente */
+    do {
+        /* Leemos del buffer circular del transceiver */
+        n = transceiver_rx_read(buf, sizeof(buf));
+        
+        if (n > 0) {
+            /* Imprimimos lo leído */
+            //printf("RX (%d bytes): ", (int)n);
+            fwrite(buf, 1, n, stdout);
+            //printf("\n");
+            fflush(stdout);
+        }
+    } while (n > 0); /* Seguimos leyendo mientras haya datos */
 }
 
 
@@ -115,14 +130,14 @@ rtems_task Init(rtems_task_argument arg) {
   transceiver_interrupt_init();
   register_tx_callback();
   /* En tu Init(), después de mapear PL etc. */
-  transceiver_rx_init_polling(5); /* poll cada 5 ms */
-  //transceiver_rx_init_interrupt();
-  //transceiver_set_rx_callback(my_rx_cb, NULL);
-  //printf("RX iniciado. Callback registrado.\n");
+  //transceiver_rx_init_polling(5); /* poll cada 5 ms */
+  transceiver_rx_init_interrupt();
+  transceiver_set_rx_callback(my_rx_notification_cb, NULL);
+  printf("RX iniciado. Callback registrado.\n");
   
   start_tx_task();
   /* Init no hace nada más; dormir en bucle. */
   for (;;) {
-    rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(100));
+    rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(1000));
   }
 }

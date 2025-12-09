@@ -1,10 +1,10 @@
-#include "transceiver.h"
 #include <rtems.h>   /* para rtems_task_wake_after en send_bytes */
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include "transceiver.h"
 #include "transceiver_interrupt.h"
-/* Ajusta tamaño de buffer RX según necesidades */
+// /* Ajusta tamaño de buffer RX según necesidades */
 #ifndef RX_QUEUE_SIZE
 #define RX_QUEUE_SIZE (4 * 1024)
 #endif
@@ -14,6 +14,22 @@ static uint8_t tx_buf[TX_BUF_SIZE];
 static size_t tx_head = 0;
 static size_t tx_tail = 0;
 static volatile bool tx_active = false;
+
+/* --- Estructuras RX --- */
+static uint8_t rx_queue[RX_QUEUE_SIZE];
+static size_t rx_head = 0;
+static size_t rx_tail = 0;
+static size_t rx_count = 0;
+/* sincronización */
+static rtems_id rx_mutex = 0;   /* mutex para proteger la cola */
+static rtems_id rx_sem = 0;     /* semáforo para notificar al worker (si se usa) */
+static rtems_id rx_poll_tid = 0;
+static int rx_poll_running = 0;
+static rtems_id rx_worker_tid = 0;
+
+/* Callback del usuario */
+static transceiver_rx_cb_t rx_callback = NULL;
+static void *rx_callback_arg = NULL;
 
 
 /* MMIO helpers */
@@ -345,40 +361,31 @@ int send_string(const char *s)
   return send_bytes((const uint8_t *)s, strlen(s));
 }
 
-static uint8_t rx_queue[RX_QUEUE_SIZE];
-static size_t rx_head = 0;
-static size_t rx_tail = 0;
-static size_t rx_count = 0;
-
-/* sincronización */
-static rtems_id rx_mutex = 0;   /* mutex para proteger la cola */
-static rtems_id rx_sem = 0;     /* semáforo para notificar al worker (si se usa) */
-static rtems_id rx_poll_tid = 0;
-static int rx_poll_running = 0;
-
-/* Callback opcional */
-static transceiver_rx_cb_t rx_callback = NULL;
-static void *rx_callback_arg = NULL;
 
 /* Helpers de cola (protegidos por rx_mutex) */
 static void rx_lock(void) { rtems_semaphore_obtain(rx_mutex, RTEMS_WAIT, RTEMS_NO_TIMEOUT); }
 static void rx_unlock(void) { rtems_semaphore_release(rx_mutex); }
 
-static size_t rx_queue_push_one(uint8_t b) {
-  size_t pushed = 0;
-  rx_lock();
-  if (rx_count < RX_QUEUE_SIZE) {
-    rx_queue[rx_tail] = b;
-    rx_tail = (rx_tail + 1) % RX_QUEUE_SIZE;
-    rx_count++;
-    pushed = 1;
-  } else {
-    /* política: descartar byte nuevo si la cola está llena.
-       Si prefieres sobrescribir el más antiguo, implementarlo aquí. */
-    pushed = 0;
-  }
-  rx_unlock();
-  return pushed;
+static void rx_queue_push_one(uint8_t b) {
+    rx_lock();
+    if (rx_count < RX_QUEUE_SIZE) {
+        rx_queue[rx_tail] = b;
+        rx_tail = (rx_tail + 1) % RX_QUEUE_SIZE;
+        rx_count++;
+    }
+    rx_unlock();
+}
+/* API Exportada: Vaciar Buffer (Leer) */
+size_t transceiver_rx_read(uint8_t *buf, size_t maxlen) {
+    size_t got = 0;
+    rx_lock();
+    while (got < maxlen && rx_count > 0) {
+        buf[got++] = rx_queue[rx_head];
+        rx_head = (rx_head + 1) % RX_QUEUE_SIZE;
+        rx_count--;
+    }
+    rx_unlock();
+    return got;
 }
 
 static size_t rx_queue_pop_bytes(uint8_t *buf, size_t maxlen) {
@@ -394,83 +401,83 @@ static size_t rx_queue_pop_bytes(uint8_t *buf, size_t maxlen) {
 }
 
 /* tarea de polling: lee GPIO3 regularmente y encola bytes */
-static rtems_task rx_poll_task(rtems_task_argument arg) {
-  uint32_t poll_interval_ms = (uint32_t)arg;
-  uint8_t tmp_buf[256];
+// static rtems_task rx_poll_task(rtems_task_argument arg) {
+//   uint32_t poll_interval_ms = (uint32_t)arg;
+//   uint8_t tmp_buf[256];
 
-  rx_poll_running = 1;
-  for (;;) {
-    /* comprobar si hay datos en el bloque PL (EMPTY == 0 => hay dato) */
-    uint32_t g3 = gpio3_read_raw();
-    if ((g3 & PS_OUT_EMPTY_MASK) == 0) {
-      /* leer en bucle todos los bytes disponibles */
-      size_t local_count = 0;
-      while ((g3 & PS_OUT_EMPTY_MASK) == 0) {
-        uint8_t b = (uint8_t)(g3 & PS_OUT_DATA_MASK);
-        if (rx_queue_push_one(b)) {
-          local_count++;
-        } else {
-          /* cola llena: descartamos nuevo byte (podemos cambiar política) */
-        }
-        /* notificar al PL que hemos consumido el dato */
-        fifo_consume_pulse();
+//   rx_poll_running = 1;
+//   for (;;) {
+//     /* comprobar si hay datos en el bloque PL (EMPTY == 0 => hay dato) */
+//     uint32_t g3 = gpio3_read_raw();
+//     if ((g3 & PS_OUT_EMPTY_MASK) == 0) {
+//       /* leer en bucle todos los bytes disponibles */
+//       size_t local_count = 0;
+//       while ((g3 & PS_OUT_EMPTY_MASK) == 0) {
+//         uint8_t b = (uint8_t)(g3 & PS_OUT_DATA_MASK);
+//         if (rx_queue_push_one(b)) {
+//           local_count++;
+//         } else {
+//           /* cola llena: descartamos nuevo byte (podemos cambiar política) */
+//         }
+//         /* notificar al PL que hemos consumido el dato */
+//         fifo_consume_pulse();
 
-        /* leer siguiente estado */
-        g3 = gpio3_read_raw();
-      }
+//         /* leer siguiente estado */
+//         g3 = gpio3_read_raw();
+//       }
       
-      /* si hay callback, sacar hasta tmp_buf y llamar (ejecuta en contexto de esta tarea) */
-      if (rx_callback) {
-        size_t n = rx_queue_pop_bytes(tmp_buf, sizeof(tmp_buf));
-        if (n > 0) {
-          rx_callback(tmp_buf, n, rx_callback_arg);
-        }
-      }
-    }
+//       /* si hay callback, sacar hasta tmp_buf y llamar (ejecuta en contexto de esta tarea) */
+//       if (rx_callback) {
+//         size_t n = rx_queue_pop_bytes(tmp_buf, sizeof(tmp_buf));
+//         if (n > 0) {
+//           rx_callback(tmp_buf, n, rx_callback_arg);
+//         }
+//       }
+//     }
 
-    /* dormir poll_interval_ms (no bloquea CPU) */
-    rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(poll_interval_ms));
-  }
+//     /* dormir poll_interval_ms (no bloquea CPU) */
+//     rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(poll_interval_ms));
+//   }
 
-  /* nunca debería llegar aquí */
-  rx_poll_running = 0;
-  rtems_task_delete(RTEMS_SELF);
-}
+//   /* nunca debería llegar aquí */
+//   rx_poll_running = 0;
+//   rtems_task_delete(RTEMS_SELF);
+// }
 
 /* API: inicia polling RX */
-int transceiver_rx_init_polling(uint32_t poll_interval_ms) {
-  rtems_status_code sc;
+// int transceiver_rx_init_polling(uint32_t poll_interval_ms) {
+//   rtems_status_code sc;
 
-  /* crear mutex si no existe */
-  if (rx_mutex == 0) {
-    sc = rtems_semaphore_create(rtems_build_name('R','X','M','X'),
-                                1, /* mutex inicial = 1 */
-                                RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
-                                0, &rx_mutex);
-    if (sc != RTEMS_SUCCESSFUL) return -1;
-  }
+//   /* crear mutex si no existe */
+//   if (rx_mutex == 0) {
+//     sc = rtems_semaphore_create(rtems_build_name('R','X','M','X'),
+//                                 1, /* mutex inicial = 1 */
+//                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
+//                                 0, &rx_mutex);
+//     if (sc != RTEMS_SUCCESSFUL) return -1;
+//   }
 
-  /* crear semáforo de notificación si lo quieres (no usado actualmente) */
-  if (rx_sem == 0) {
-    sc = rtems_semaphore_create(rtems_build_name('R','X','S','M'),
-                                0,
-                                RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
-                                0, &rx_sem);
-    if (sc != RTEMS_SUCCESSFUL) return -1;
-  }
+//   /* crear semáforo de notificación si lo quieres (no usado actualmente) */
+//   if (rx_sem == 0) {
+//     sc = rtems_semaphore_create(rtems_build_name('R','X','S','M'),
+//                                 0,
+//                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
+//                                 0, &rx_sem);
+//     if (sc != RTEMS_SUCCESSFUL) return -1;
+//   }
 
-  /* crear tarea polling */
-  sc = rtems_task_create(rtems_build_name('R','X','P','L'),
-                         100, RTEMS_MINIMUM_STACK_SIZE * 2,
-                         RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_poll_tid);
-  if (sc != RTEMS_SUCCESSFUL) return -1;
+//   /* crear tarea polling */
+//   sc = rtems_task_create(rtems_build_name('R','X','P','L'),
+//                          100, RTEMS_MINIMUM_STACK_SIZE * 2,
+//                          RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_poll_tid);
+//   if (sc != RTEMS_SUCCESSFUL) return -1;
 
-  /* arrancar la tarea pasando poll_interval_ms como argumento */
-  sc = rtems_task_start(rx_poll_tid, rx_poll_task, (rtems_task_argument)poll_interval_ms);
-  if (sc != RTEMS_SUCCESSFUL) return -1;
+//   /* arrancar la tarea pasando poll_interval_ms como argumento */
+//   sc = rtems_task_start(rx_poll_tid, rx_poll_task, (rtems_task_argument)poll_interval_ms);
+//   if (sc != RTEMS_SUCCESSFUL) return -1;
 
-  return 0;
-}
+//   return 0;
+// }
 
 static void rx_read_store_callback(void){
   //printf("rx_read_store_callback\n");
@@ -490,22 +497,57 @@ static void rx_read_store_callback(void){
       }
     }
 }
+/* TAREA WORKER (Bottom Half) */
+static rtems_task rx_interrupt_worker_task(rtems_task_argument arg) {
+    (void)arg;
+    rtems_event_set events;
 
-void transceiver_rx_init_interrupt(void){
-    rtems_status_code sc;
+    /* Nos aseguramos de habilitar la interrupción al nacer */
+    transceiver_int_enable_rx(true);
 
-  /* crear mutex si no existe */
-  if (rx_mutex == 0) {
-    sc = rtems_semaphore_create(rtems_build_name('R','X','M','X'),
-                                1, /* mutex inicial = 1 */
-                                RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
-                                0, &rx_mutex);
-    if (sc != RTEMS_SUCCESSFUL) return -1;
-  }
+    for (;;) {
+        /* 1. DORMIR esperando el evento de la ISR */
+        rtems_event_receive(RTEMS_EVENT_0, RTEMS_WAIT | RTEMS_EVENT_ANY, RTEMS_NO_TIMEOUT, &events);
 
-    transceiver_register_rx_callback( (void (*)(void))rx_read_store_callback );
+        /* 2. LEER DATOS: Vaciar FIFO Hardware -> Buffer Software */
+        /* Nota: Usamos gpio3_read_raw() y PS_OUT_EMPTY_MASK de tu .h */
+        while ((gpio3_read_raw() & PS_OUT_EMPTY_MASK) == 0) {
+            uint8_t b = (uint8_t)(gpio3_read_raw() & PS_OUT_DATA_MASK);
+            
+            rx_queue_push_one(b); /* Guardar en buffer circular */
+            fifo_consume_pulse(); /* Avisar al HW que leímos */
+        }
+
+        /* 3. AVISAR AL USUARIO (Main) */
+        /* El buffer ya tiene los datos, el callback solo avisa "hay datos" */
+        if (rx_callback) {
+            rx_callback(NULL, 0, rx_callback_arg); 
+            /* Pasamos NULL/0 porque el usuario usará transceiver_rx_read para leer todo lo que quiera */
+        }
+
+        /* 4. REACTIVAR interrupción para el siguiente paquete */
+        transceiver_int_enable_rx(true);
+    }
 }
 
+
+void transceiver_rx_init_interrupt(void) {
+    rtems_status_code sc;
+
+    if (rx_mutex == 0) {
+        rtems_semaphore_create(rtems_build_name('R','X','M','X'), 1, 
+                               RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &rx_mutex);
+    }
+
+    sc = rtems_task_create(rtems_build_name('R','X','W','K'),
+                           50, RTEMS_MINIMUM_STACK_SIZE * 2,
+                           RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_worker_tid);
+
+    if (sc == RTEMS_SUCCESSFUL) {
+        transceiver_register_rx_worker_id(rx_worker_tid);
+        rtems_task_start(rx_worker_tid, rx_interrupt_worker_task, 0);
+    }
+}
 /* Registrar callback (puede ser NULL para desregistrar) */
 void transceiver_set_rx_callback(transceiver_rx_cb_t cb, void *arg)
 {
@@ -523,10 +565,10 @@ size_t transceiver_rx_available(void)
   return c;
 }
 
-size_t transceiver_rx_read(uint8_t *buf, size_t maxlen)
-{
-  return rx_queue_pop_bytes(buf, maxlen);
-}
+// size_t transceiver_rx_read(uint8_t *buf, size_t maxlen)
+// {
+//   return rx_queue_pop_bytes(buf, maxlen);
+// }
 
 /* Shutdown básico (no mata la tarea de forma elegante) */
 void transceiver_rx_shutdown(void)
