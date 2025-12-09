@@ -1,584 +1,342 @@
-#include <rtems.h>   /* para rtems_task_wake_after en send_bytes */
+/*
+ * transceiver.c
+ */
+
+#include "transceiver.h"
+#include <rtems.h>
 #include <stdio.h>
 #include <string.h>
-#include <inttypes.h>
-#include "transceiver.h"
-#include "transceiver_interrupt.h"
-// /* Ajusta tamaño de buffer RX según necesidades */
-#ifndef RX_QUEUE_SIZE
-#define RX_QUEUE_SIZE (4 * 1024)
-#endif
+#include <stdbool.h>
 
-#define TX_BUF_SIZE 256
-static uint8_t tx_buf[TX_BUF_SIZE];
-static size_t tx_head = 0;
-static size_t tx_tail = 0;
+/* =========================================================================
+ * 1. DEFINICIONES DE REGISTROS (Privado - Hardware Abstraction Layer)
+ * ========================================================================= */
+
+/* Direcciones Base */
+#define GPIO0_BASE       0xA0000000u  /* Configuración Serial */
+#define GPIO1_BASE       0xA0010000u  /* Control de Flujo RX */
+#define GPIO2_BASE       0xA0020000u  /* Datos TX */
+#define GPIO3_BASE       0xA0030000u  /* Datos RX */
+#define INTC_BASE_ADDR   0xA0040000u  /* AXI Interrupt Controller */
+
+/* Offsets AXI INTC */
+#define INTC_ISR_OFFSET  0x00u
+#define INTC_IER_OFFSET  0x08u
+#define INTC_IAR_OFFSET  0x0Cu
+#define INTC_SIE_OFFSET  0x10u /* Set Enable */
+#define INTC_CIE_OFFSET  0x14u /* Clear Enable */
+#define INTC_MER_OFFSET  0x1Cu
+
+/* Máscaras y Bits */
+#define INTR_RX_BIT      1
+#define INTR_TX_BIT      0
+#define IRQ_ID_PL_PS     121   /* ZynqMP PL-PS IRQ */
+
+/* Máscaras GPIO */
+#define PS_OUT_TX_RDY_MASK    0x2000u
+#define PS_OUT_EMPTY_MASK     0x0200u
+#define PS_OUT_DATA_MASK      0x01FFu
+
+#define GPIO1_DATA_READ_MASK  0x1u
+#define GPIO2_DATA_IN_MASK    0x01FFu
+#define GPIO2_TX_SEND_MASK    0x0200u
+
+/* Máscaras Configuración Serial */
+#define SERIAL_BAUD_MASK      0x003FFFFFu
+#define SERIAL_STOP_MASK      0x01C00000u
+#define SERIAL_PARITY_MASK    0x0E000000u
+#define SERIAL_DATA_BITS_MASK 0x70000000u
+#define SERIAL_BIT_ORDER_MASK 0x80000000u
+
+/* Configuraciones de Software */
+#define RX_QUEUE_SIZE    (4 * 1024)
+#define TX_BUF_SIZE      256
+#define WORKER_PRIORITY  50
+#define WORKER_STACK     (RTEMS_MINIMUM_STACK_SIZE * 2)
+
+/* =========================================================================
+ * 2. VARIABLES GLOBALES (Privadas - Static)
+ * ========================================================================= */
+
+/* Contexto RX */
+static uint8_t  rx_queue[RX_QUEUE_SIZE];
+static size_t   rx_head = 0;
+static size_t   rx_tail = 0;
+static size_t   rx_count = 0;
+static rtems_id rx_mutex_id = 0;
+static rtems_id rx_worker_id = 0;
+
+/* Contexto TX */
+static uint8_t  tx_buf[TX_BUF_SIZE];
+static size_t   tx_head = 0;
+static size_t   tx_tail = 0;
 static volatile bool tx_active = false;
 
-/* --- Estructuras RX --- */
-static uint8_t rx_queue[RX_QUEUE_SIZE];
-static size_t rx_head = 0;
-static size_t rx_tail = 0;
-static size_t rx_count = 0;
-/* sincronización */
-static rtems_id rx_mutex = 0;   /* mutex para proteger la cola */
-static rtems_id rx_sem = 0;     /* semáforo para notificar al worker (si se usa) */
-static rtems_id rx_poll_tid = 0;
-static int rx_poll_running = 0;
-static rtems_id rx_worker_tid = 0;
+/* Callbacks */
+static Transceiver_Event_Cb_t user_rx_cb = NULL;
+static void *user_rx_arg = NULL;
 
-/* Callback del usuario */
-static transceiver_rx_cb_t rx_callback = NULL;
-static void *rx_callback_arg = NULL;
+/* =========================================================================
+ * 3. FUNCIONES HELPER (Low Level)
+ * ========================================================================= */
 
-
-/* MMIO helpers */
-void mmio_write32(uintptr_t a, uint32_t v) {
-  *(volatile uint32_t *)a = v;
-  __asm__ volatile("dmb sy" ::: "memory");
-}
-uint32_t mmio_read32(uintptr_t a) {
-  __asm__ volatile("dmb sy" ::: "memory");
-  return *(volatile uint32_t *)a;
+static inline void mmio_write32(uintptr_t addr, uint32_t val) {
+    *(volatile uint32_t *)addr = val;
+    __asm__ volatile("dmb sy" ::: "memory");
 }
 
-/* ---- GPIO helpers (lectura/escritura por campos) ---- */
-uint32_t gpio0_read_raw(void) {
-  return mmio_read32(GPIO0_BASE + GPIO0_DATA_OFF);
-}
-void gpio0_write_raw(uint32_t v) {
-  mmio_write32(GPIO0_BASE + GPIO0_DATA_OFF, v);
-  __asm__ volatile("dmb sy" ::: "memory");
-}
-uint32_t gpio1_read_raw(void) {
-  return mmio_read32(GPIO1_BASE + GPIO1_DATA_OFF);
-}
-uint32_t gpio2_read_raw(void) {
-  return mmio_read32(GPIO2_BASE + GPIO2_DATA_OFF);
-}
-uint32_t gpio3_read_raw(void) {
-  return mmio_read32(GPIO3_BASE + GPIO3_DATA_OFF);
+static inline uint32_t mmio_read32(uintptr_t addr) {
+    __asm__ volatile("dmb sy" ::: "memory");
+    return *(volatile uint32_t *)addr;
 }
 
-/* RMW helpers */
-void gpio1_write_rmw(uint32_t mask, uint32_t value_masked) {
-  uintptr_t addr = GPIO1_BASE + GPIO1_DATA_OFF;
-  uint32_t v = mmio_read32(addr);
-  v &= ~mask;
-  v |= (value_masked & mask);
-  mmio_write32(addr, v);
-  __asm__ volatile("dmb sy" ::: "memory");
-}
-void gpio2_write_rmw(uint32_t mask, uint32_t value_masked) {
-  uintptr_t addr = GPIO2_BASE + GPIO2_DATA_OFF;
-  uint32_t v = mmio_read32(addr);
-  v &= ~mask;
-  v |= (value_masked & mask);
-  mmio_write32(addr, v);
-  __asm__ volatile("dmb sy" ::: "memory");
-}
-void gpio0_write_field(uint32_t mask, unsigned shift, uint32_t val) {
-  uint32_t v = gpio0_read_raw();
-  v &= ~mask;
-  v |= ((val << shift) & mask);
-  gpio0_write_raw(v);
+static void gpio_rmw(uintptr_t base, uint32_t mask, uint32_t val) {
+    uint32_t reg = mmio_read32(base);
+    reg &= ~mask;
+    reg |= (val & mask);
+    mmio_write32(base, reg);
 }
 
-/* SERIAL getters/setters */
-uint32_t serial_get_baudrate(void) { return gpio0_read_raw() & SERIAL_BAUD_MASK; }
-uint32_t serial_get_stop_bits(void) { return (gpio0_read_raw() & SERIAL_STOP_MASK) >> 22; }
-uint32_t serial_get_parity(void) { return (gpio0_read_raw() & SERIAL_PARITY_MASK) >> 25; }
-uint32_t serial_get_data_bits(void) { return (gpio0_read_raw() & SERIAL_DATA_BITS_MASK) >> 28; }
-uint32_t serial_get_bit_order(void) { return (gpio0_read_raw() & SERIAL_BIT_ORDER_MASK) ? 1u : 0u; }
-
-void serial_set_baudrate(uint32_t br) { gpio0_write_field(SERIAL_BAUD_MASK, 0u, br & 0x3FFFFFu); }
-void serial_set_stop_bits(uint32_t sb) { gpio0_write_field(SERIAL_STOP_MASK, 22u, sb & 0x7u); }
-void serial_set_parity(uint32_t p) { gpio0_write_field(SERIAL_PARITY_MASK, 25u, p & 0x7u); }
-void serial_set_data_bits(uint32_t db) { gpio0_write_field(SERIAL_DATA_BITS_MASK, 28u, db & 0x7u); }
-void serial_set_bit_order(uint32_t bo) { gpio0_write_field(SERIAL_BIT_ORDER_MASK, 31u, bo & 0x1u); }
-
-/* TX helper: pulse TX_SEND in GPIO2 (RMW) */
-void tx_write_data_and_send(uint16_t data9) {
-  gpio2_write_rmw(GPIO2_DATA_IN_MASK, (uint32_t)(data9 & GPIO2_DATA_IN_MASK));
-  /* pulse TX_SEND (bit 9) */
-  gpio2_write_rmw(GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
-  for (volatile int i = 0; i < 200; ++i) __asm__ volatile("nop");
-  gpio2_write_rmw(GPIO2_TX_SEND_MASK, 0u);
+/* Pulso para confirmar lectura al HW */
+static void fifo_consume_pulse(void) {
+    gpio_rmw(GPIO1_BASE, GPIO1_DATA_READ_MASK, GPIO1_DATA_READ_MASK);
+    /* Pequeña espera para asegurar que el HW lo pilla */
+    for (volatile int i = 0; i < 50; ++i) __asm__ volatile("nop");
+    gpio_rmw(GPIO1_BASE, GPIO1_DATA_READ_MASK, 0);
 }
 
-/* DATA_READ pulse on GPIO1 */
-void fifo_consume_pulse(void) {
-  gpio1_write_rmw(GPIO1_DATA_READ_MASK, GPIO1_DATA_READ_MASK);
-  for (volatile int i = 0; i < 200; ++i) __asm__ volatile("nop");
-  gpio1_write_rmw(GPIO1_DATA_READ_MASK, 0u);
-}
-
-/* Field-style helpers */
-void gpio1_write_data_read(uint32_t v)
-{
-    uint32_t reg = mmio_read32(GPIO1_BASE);
-    reg &= ~0x1u;          // limpiar bit0
-    reg |= (v & 0x1u);     // escribir nuevo valor
-    mmio_write32(GPIO1_BASE, reg);
-}
-
-void gpio1_write_error_ok(uint32_t v)
-{
-    uint32_t reg = mmio_read32(GPIO1_BASE);
-    reg &= ~0x2u;              // limpiar bit1
-    reg |= ((v & 0x1u) << 1);  // escribir bit1
-    mmio_write32(GPIO1_BASE, reg);
-}
-void gpio2_write_data_in(uint32_t v)
-{
-    v &= 0x1FFu;           // limitar a 9 bits
-    uint32_t reg = mmio_read32(GPIO2_BASE);
-    reg &= ~0x1FFu;        // limpiar bits 0–8
-    reg |= v;              // escribir DATA_IN
-    mmio_write32(GPIO2_BASE, reg);
-}
-
-void gpio2_write_tx_send(uint32_t v)
-{
-    uint32_t reg = mmio_read32(GPIO2_BASE);
-    reg &= ~(1u << 9);         // limpiar bit9
-    reg |= ((v & 0x1u) << 9);  // escribir TX_SEND
-    mmio_write32(GPIO2_BASE, reg);
-}
-
-/* --- variables estáticas para cachear el tiempo de frame --- */
-static uint32_t cached_frame_time_ms = 0;    /* 0 = no calculado aún */
-static uint64_t cached_frame_time_us = 0ULL; /* valor en microsegundos */
-
-/* Helper interno: calcula frame_time (us, ms) a partir de los parámetros actuales leídos
-   de los registros SERIAL (gpio0). Usa las mismas asunciones que antes:
-     data_bits = 5 + data_bits_code
-     parity_code == 4 -> sin paridad
-     stop_bits_code >=1 -> número de stop bits, si es 0 -> 1
-*/
-static void transceiver_calc_frame_time_from_regs(void)
-{
-  uint32_t baud = serial_get_baudrate();
-  if (baud == 0) baud = 115200u; /* fallback */
-
-  uint32_t data_bits_code = serial_get_data_bits(); /* 0..n -> mapping asumido */
-  uint32_t data_bits = 5u + data_bits_code;        /* asumimos mapping 5..8 */
-
-  uint32_t parity_code = serial_get_parity();
-  int parity_enabled = (parity_code == 4u) ? 0 : 1;
-
-  uint32_t stop_bits_code = serial_get_stop_bits();
-  uint32_t stop_bits = (stop_bits_code >= 1u) ? stop_bits_code : 1u;
-
-  uint32_t frame_bits = 1u /* start */ + data_bits + (parity_enabled ? 1u : 0u) + stop_bits;
-
-  uint64_t frame_time_us_local = (uint64_t)frame_bits * 1000000ULL;
-  /* ceil division: (frame_bits*1e6 + baud -1) / baud) */
-  frame_time_us_local = (frame_time_us_local + (uint64_t)baud - 1ULL) / (uint64_t)baud;
-
-  uint32_t frame_time_ms_local = (uint32_t)((frame_time_us_local + 999ULL) / 1000ULL);
-  if (frame_time_ms_local == 0) frame_time_ms_local = 1;
-
-  cached_frame_time_us = frame_time_us_local;
-  cached_frame_time_ms = frame_time_ms_local;
-}
-
-/* Pública: fuerza recálculo usando registros actuales */
-void transceiver_update_cached_frame_time(void)
-{
-  transceiver_calc_frame_time_from_regs();
-}
-
-/* Pública: devuelve frame time cacheado en ms */
-uint32_t transceiver_get_frame_time_ms(void)
-{
-  return cached_frame_time_ms;
-}
-
-/* Pública: configurar el transceiver y recálculo si tocas el baud (o siempre) */
-int transceiver_configure(const transceiver_cfg_t *cfg)
-{
-  if (!cfg) return -1;
-
-  /* Aplicar únicamente los campos solicitados (convención: 0 = no tocar, salvo bit_order) */
-  if (cfg->baud != 0) {
-    serial_set_baudrate(cfg->baud);
-  }
-  if (cfg->data_bits != 0) {
-    /* asumimos que cfg->data_bits viene codificado igual que serial_set_data_bits espera */
-    serial_set_data_bits(cfg->data_bits);
-  }
-  if (cfg->parity != 0) {
-    serial_set_parity(cfg->parity);
-  }
-  if (cfg->stop_bits != 0) {
-    serial_set_stop_bits(cfg->stop_bits);
-  }
-  if (cfg->bit_order != 0xFFFFFFFFu) {
-    serial_set_bit_order(cfg->bit_order);
-  }
-
-  /* Siempre recalculamos la cache porque cualquier cambio en config puede afectar al tiempo */
-  transceiver_calc_frame_time_from_regs();
-
-  return 0;
-}
-
-static void tx_kick(void) {
-  if (tx_tail == tx_head) {
-    tx_active = false;
-    return;  // Nada que enviar
-  }
-
-  uint8_t byte = tx_buf[tx_tail];
-  tx_tail = (tx_tail + 1) % TX_BUF_SIZE;
-
-  tx_active = true;
-
-  /* Transmitir el byte */
-  gpio2_write_rmw(GPIO2_DATA_IN_MASK, (uint32_t)(byte & GPIO2_DATA_IN_MASK));
-  gpio2_write_rmw(GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
-  for (volatile int j = 0; j < 100; ++j) __asm__ volatile("nop");
-  gpio2_write_rmw(GPIO2_TX_SEND_MASK, 0u);
-}
-
-void register_tx_callback(void){
-  transceiver_register_tx_callback( (void (*)(void))tx_kick );
-}
-/* ---- Higher-level send_bytes ---- */
-/* Devuelve 0 OK, -1 timeout -- OLD */
-// int send_bytes(const uint8_t *buf, size_t len, uint32_t timeout_ms_per_byte) {
-//   if (!buf || len == 0) return 0;
-
-//   for (size_t i = 0; i < len; ++i) {
-//     uint16_t data9 = (uint16_t)(buf[i] & GPIO2_DATA_IN_MASK);
-
-//     /* 1) escribir DATA_IN (9 bits) y pulsar TX_SEND inmediatamente */
-//     gpio2_write_rmw(GPIO2_DATA_IN_MASK, (uint32_t)data9);
-//     gpio2_write_rmw(GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
-//     for (volatile int j = 0; j < 100; ++j) __asm__ volatile("nop");
-//     gpio2_write_rmw(GPIO2_TX_SEND_MASK, 0u);
-
-//     /* 2) obtener tiempo estimado de transmisión del fotograma en ms (usamos cache si existe) */
-//     uint32_t frame_time_ms = cached_frame_time_ms;
-//     if (frame_time_ms == 0) {
-//       /* si no está cacheado, calculamos (pero también actualizamos cache) */
-//       transceiver_calc_frame_time_from_regs();
-//       frame_time_ms = cached_frame_time_ms;
-//     }
-//     rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(frame_time_ms));
-
-//     /* 3) comprobar TX_RDY; si está listo -> siguiente byte */
-//     if (gpio3_read_raw() & PS_OUT_TX_RDY_MASK) {
-//       /* listo, siguiente iteración (siguiente byte) */
-//       continue;
-//     }
-
-//     /* 4) Si no está listo, fallback híbrido: busy-wait corto + sleep por pasos */
-//     {
-//       const unsigned AFTER_WAKE_NOP_ITERS = 2000u; /* busy-wait corto tras cada wake (tuneable) */
-//       const uint32_t STEP_MS = 1u;
-
-//       int ready = 0;
-
-//       if (timeout_ms_per_byte == 0) {
-//         /* espera indefinida: combinamos ventanas de busy-wait y sleeps para no saturar CPU */
-//         for (;;) {
-//           /* busy-wait corto */
-//           for (unsigned k = 0; k < AFTER_WAKE_NOP_ITERS; ++k) {
-//             if (gpio3_read_raw() & PS_OUT_TX_RDY_MASK) { ready = 1; break; }
-//             __asm__ volatile("nop");
-//           }
-//           if (ready) break;
-
-//           /* dormir 1 ms (no bloquea CPU intensivamente) */
-//           rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(STEP_MS));
-//         }
-//       } else {
-//         uint32_t waited = 0;
-
-//         /* primer intento con busy-wait corto */
-//         for (unsigned k = 0; k < AFTER_WAKE_NOP_ITERS; ++k) {
-//           if (gpio3_read_raw() & PS_OUT_TX_RDY_MASK) { ready = 1; break; }
-//           __asm__ volatile("nop");
-//         }
-//         if (!ready) {
-//           while (!ready) {
-//             if (waited >= timeout_ms_per_byte) {
-//               return -1; /* timeout */
-//             }
-
-//             /* dormir 1 ms */
-//             rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(STEP_MS));
-//             waited += STEP_MS;
-
-//             /* busy-wait corto tras despertar para atrapar la transición rápido */
-//             for (unsigned k = 0; k < AFTER_WAKE_NOP_ITERS; ++k) {
-//               if (gpio3_read_raw() & PS_OUT_TX_RDY_MASK) { ready = 1; break; }
-//               __asm__ volatile("nop");
-//             }
-//           }
-//         }
-//       }
-
-//       /* cuando salimos del bloque, 'ready' es verdadero (TX_RDY) */
-//       (void)ready;
-//     }
-
-//     /* 5) TX_RDY detectado -> continuar con el siguiente byte */
-//   }
-
-//   return 0;
-// }
-/* new with interrupts */
-int send_bytes(const uint8_t *buf, size_t len) {
-  if (!buf || len == 0) return 0;
-
-  for (size_t i = 0; i < len; ++i) {
-    size_t next_head = (tx_head + 1) % TX_BUF_SIZE;
-
-    if (next_head == tx_tail) {
-      // Buffer lleno
-      return -1;
-    }
-
-    tx_buf[tx_head] = buf[i];
-    tx_head = next_head;
-  }
-
-  if ((gpio3_read_raw() & PS_OUT_TX_RDY_MASK) && !tx_active) {
-    tx_kick();  // lanzar la transmisión si está libre
-  }
-
-  return 0;
-}
-
-
-/* Envoltorio para strings C null-terminated (no envía el '\0') */
-int send_string(const char *s)
-{
-  if (!s) return -1;
-  return send_bytes((const uint8_t *)s, strlen(s));
-}
-
-
-/* Helpers de cola (protegidos por rx_mutex) */
-static void rx_lock(void) { rtems_semaphore_obtain(rx_mutex, RTEMS_WAIT, RTEMS_NO_TIMEOUT); }
-static void rx_unlock(void) { rtems_semaphore_release(rx_mutex); }
-
-static void rx_queue_push_one(uint8_t b) {
-    rx_lock();
-    if (rx_count < RX_QUEUE_SIZE) {
-        rx_queue[rx_tail] = b;
-        rx_tail = (rx_tail + 1) % RX_QUEUE_SIZE;
-        rx_count++;
-    }
-    rx_unlock();
-}
-/* API Exportada: Vaciar Buffer (Leer) */
-size_t transceiver_rx_read(uint8_t *buf, size_t maxlen) {
-    size_t got = 0;
-    rx_lock();
-    while (got < maxlen && rx_count > 0) {
-        buf[got++] = rx_queue[rx_head];
-        rx_head = (rx_head + 1) % RX_QUEUE_SIZE;
-        rx_count--;
-    }
-    rx_unlock();
-    return got;
-}
-
-static size_t rx_queue_pop_bytes(uint8_t *buf, size_t maxlen) {
-  size_t got = 0;
-  rx_lock();
-  while (got < maxlen && rx_count > 0) {
-    buf[got++] = rx_queue[rx_head];
-    rx_head = (rx_head + 1) % RX_QUEUE_SIZE;
-    rx_count--;
-  }
-  rx_unlock();
-  return got;
-}
-
-/* tarea de polling: lee GPIO3 regularmente y encola bytes */
-// static rtems_task rx_poll_task(rtems_task_argument arg) {
-//   uint32_t poll_interval_ms = (uint32_t)arg;
-//   uint8_t tmp_buf[256];
-
-//   rx_poll_running = 1;
-//   for (;;) {
-//     /* comprobar si hay datos en el bloque PL (EMPTY == 0 => hay dato) */
-//     uint32_t g3 = gpio3_read_raw();
-//     if ((g3 & PS_OUT_EMPTY_MASK) == 0) {
-//       /* leer en bucle todos los bytes disponibles */
-//       size_t local_count = 0;
-//       while ((g3 & PS_OUT_EMPTY_MASK) == 0) {
-//         uint8_t b = (uint8_t)(g3 & PS_OUT_DATA_MASK);
-//         if (rx_queue_push_one(b)) {
-//           local_count++;
-//         } else {
-//           /* cola llena: descartamos nuevo byte (podemos cambiar política) */
-//         }
-//         /* notificar al PL que hemos consumido el dato */
-//         fifo_consume_pulse();
-
-//         /* leer siguiente estado */
-//         g3 = gpio3_read_raw();
-//       }
-      
-//       /* si hay callback, sacar hasta tmp_buf y llamar (ejecuta en contexto de esta tarea) */
-//       if (rx_callback) {
-//         size_t n = rx_queue_pop_bytes(tmp_buf, sizeof(tmp_buf));
-//         if (n > 0) {
-//           rx_callback(tmp_buf, n, rx_callback_arg);
-//         }
-//       }
-//     }
-
-//     /* dormir poll_interval_ms (no bloquea CPU) */
-//     rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(poll_interval_ms));
-//   }
-
-//   /* nunca debería llegar aquí */
-//   rx_poll_running = 0;
-//   rtems_task_delete(RTEMS_SELF);
-// }
-
-/* API: inicia polling RX */
-// int transceiver_rx_init_polling(uint32_t poll_interval_ms) {
-//   rtems_status_code sc;
-
-//   /* crear mutex si no existe */
-//   if (rx_mutex == 0) {
-//     sc = rtems_semaphore_create(rtems_build_name('R','X','M','X'),
-//                                 1, /* mutex inicial = 1 */
-//                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
-//                                 0, &rx_mutex);
-//     if (sc != RTEMS_SUCCESSFUL) return -1;
-//   }
-
-//   /* crear semáforo de notificación si lo quieres (no usado actualmente) */
-//   if (rx_sem == 0) {
-//     sc = rtems_semaphore_create(rtems_build_name('R','X','S','M'),
-//                                 0,
-//                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
-//                                 0, &rx_sem);
-//     if (sc != RTEMS_SUCCESSFUL) return -1;
-//   }
-
-//   /* crear tarea polling */
-//   sc = rtems_task_create(rtems_build_name('R','X','P','L'),
-//                          100, RTEMS_MINIMUM_STACK_SIZE * 2,
-//                          RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_poll_tid);
-//   if (sc != RTEMS_SUCCESSFUL) return -1;
-
-//   /* arrancar la tarea pasando poll_interval_ms como argumento */
-//   sc = rtems_task_start(rx_poll_tid, rx_poll_task, (rtems_task_argument)poll_interval_ms);
-//   if (sc != RTEMS_SUCCESSFUL) return -1;
-
-//   return 0;
-// }
-
-static void rx_read_store_callback(void){
-  //printf("rx_read_store_callback\n");
-    uint32_t g3 = gpio3_read_raw();
-    if ((g3 & PS_OUT_EMPTY_MASK) == 0) {
-        uint8_t b = (uint8_t)(g3 & PS_OUT_DATA_MASK);
-        rx_queue_push_one(b);
-        fifo_consume_pulse();
-    }
-    uint8_t tmp_buf[256];
-    /* si hay callback, sacar hasta tmp_buf y llamar (ejecuta en contexto de esta tarea) */
-    if (rx_callback) {
-      size_t n = rx_queue_pop_bytes(tmp_buf, sizeof(tmp_buf));
-      if (n > 0) {
-        //printf("rx_callback called\n");
-        rx_callback(tmp_buf, n, rx_callback_arg);
-      }
+/* Control de Interrupción RX (Enable/Disable) */
+static void hw_int_enable_rx(bool enable) {
+    if (enable) {
+        mmio_write32(INTC_BASE_ADDR + INTC_SIE_OFFSET, (1 << INTR_RX_BIT));
+    } else {
+        mmio_write32(INTC_BASE_ADDR + INTC_CIE_OFFSET, (1 << INTR_RX_BIT));
     }
 }
-/* TAREA WORKER (Bottom Half) */
-static rtems_task rx_interrupt_worker_task(rtems_task_argument arg) {
+
+/* =========================================================================
+ * 4. RUTINA DE SERVICIO DE INTERRUPCIÓN (ISR - Top Half)
+ * ========================================================================= */
+
+static rtems_isr Transceiver_ISR(rtems_vector_number vector) {
+    (void)vector;
+    uint32_t pending = mmio_read32(INTC_BASE_ADDR + INTC_ISR_OFFSET);
+
+    /* --- Manejo de Recepción (RX) --- */
+    if (pending & (1 << INTR_RX_BIT)) {
+        /* 1. Confirmar interrupción (ACK) */
+        mmio_write32(INTC_BASE_ADDR + INTC_IAR_OFFSET, (1 << INTR_RX_BIT));
+
+        /* 2. SILENCIAR: Deshabilitar interrupción RX para evitar bucle infinito.
+           El Worker la volverá a habilitar cuando limpie la FIFO. */
+        mmio_write32(INTC_BASE_ADDR + INTC_CIE_OFFSET, (1 << INTR_RX_BIT));
+
+        /* 3. Despertar al Worker (Bottom Half) */
+        if (rx_worker_id != 0) {
+            rtems_event_send(rx_worker_id, RTEMS_EVENT_0);
+        }
+    }
+
+    /* --- Manejo de Transmisión (TX) --- */
+    if (pending & (1 << INTR_TX_BIT)) {
+        mmio_write32(INTC_BASE_ADDR + INTC_IAR_OFFSET, (1 << INTR_TX_BIT));
+        
+        /* Lógica TX simple: enviar siguiente byte si hay */
+        if (tx_active) {
+             if (tx_head != tx_tail) {
+                /* Hay más datos, enviar siguiente (Implementación básica) */
+                uint8_t b = tx_buf[tx_tail];
+                tx_tail = (tx_tail + 1) % TX_BUF_SIZE;
+                
+                gpio_rmw(GPIO2_BASE, GPIO2_DATA_IN_MASK, b);
+                gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
+                for (volatile int k=0; k<50; ++k) __asm__ volatile("nop");
+                gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, 0);
+             } else {
+                 tx_active = false; /* Buffer vacío */
+             }
+        }
+    }
+}
+
+/* =========================================================================
+ * 5. TAREA WORKER (Bottom Half)
+ * ========================================================================= */
+
+static rtems_task Rx_Worker_Task(rtems_task_argument arg) {
     (void)arg;
     rtems_event_set events;
 
-    /* Nos aseguramos de habilitar la interrupción al nacer */
-    transceiver_int_enable_rx(true);
+    /* Inicio seguro: Habilitar RX */
+    hw_int_enable_rx(true);
 
     for (;;) {
-        /* 1. DORMIR esperando el evento de la ISR */
+        /* 1. Dormir hasta ser despertado por la ISR */
         rtems_event_receive(RTEMS_EVENT_0, RTEMS_WAIT | RTEMS_EVENT_ANY, RTEMS_NO_TIMEOUT, &events);
 
-        /* 2. LEER DATOS: Vaciar FIFO Hardware -> Buffer Software */
-        /* Nota: Usamos gpio3_read_raw() y PS_OUT_EMPTY_MASK de tu .h */
-        while ((gpio3_read_raw() & PS_OUT_EMPTY_MASK) == 0) {
-            uint8_t b = (uint8_t)(gpio3_read_raw() & PS_OUT_DATA_MASK);
+        /* 2. Bucle de Vaciado de FIFO Hardware */
+        /* Mientras la señal EMPTY (bit 9) sea 0 (Lógica Negativa: 0 = Hay dato) */
+        while ((mmio_read32(GPIO3_BASE) & PS_OUT_EMPTY_MASK) == 0) {
             
-            rx_queue_push_one(b); /* Guardar en buffer circular */
-            fifo_consume_pulse(); /* Avisar al HW que leímos */
+            /* Leer dato crudo */
+            uint32_t raw = mmio_read32(GPIO3_BASE);
+            uint8_t  byte = (uint8_t)(raw & PS_OUT_DATA_MASK);
+
+            /* Guardar en buffer circular (Protegido por Mutex) */
+            rtems_semaphore_obtain(rx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+            if (rx_count < RX_QUEUE_SIZE) {
+                rx_queue[rx_tail] = byte;
+                rx_tail = (rx_tail + 1) % RX_QUEUE_SIZE;
+                rx_count++;
+            }
+            rtems_semaphore_release(rx_mutex_id);
+
+            /* Confirmar lectura al HW */
+            fifo_consume_pulse();
         }
 
-        /* 3. AVISAR AL USUARIO (Main) */
-        /* El buffer ya tiene los datos, el callback solo avisa "hay datos" */
-        if (rx_callback) {
-            rx_callback(NULL, 0, rx_callback_arg); 
-            /* Pasamos NULL/0 porque el usuario usará transceiver_rx_read para leer todo lo que quiera */
+        /* 3. Notificar al usuario (si hay callback registrado) */
+        if (user_rx_cb) {
+            user_rx_cb(user_rx_arg);
         }
 
-        /* 4. REACTIVAR interrupción para el siguiente paquete */
-        transceiver_int_enable_rx(true);
+        /* 4. Reactivar Interrupción RX */
+        hw_int_enable_rx(true);
     }
 }
 
+/* =========================================================================
+ * 6. API PÚBLICA
+ * ========================================================================= */
 
-void transceiver_rx_init_interrupt(void) {
+rtems_status_code Transceiver_Init(const Transceiver_Config_t *cfg) {
     rtems_status_code sc;
 
-    if (rx_mutex == 0) {
-        rtems_semaphore_create(rtems_build_name('R','X','M','X'), 1, 
-                               RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &rx_mutex);
+    /* 1. Mapeo de memoria (externo o interno, asumimos hecho o llamar aquí) */
+    /* mmu_map_pl_axi_early(); */ 
+
+    /* 2. Configuración de Hardware (Baud, Parity, etc.) */
+    if (cfg) {
+        /* Leer estado actual del registro de configuración (GPIO0) */
+        uint32_t val = mmio_read32(GPIO0_BASE);
+
+        /* 2.1 Baud Rate (Bits 0-21) */
+        if (cfg->baud != 0) {
+            val &= ~SERIAL_BAUD_MASK;
+            val |= (cfg->baud & SERIAL_BAUD_MASK);
+        }
+
+        /* 2.2 Stop Bits (Bits 22-24) */
+        if (cfg->stop_bits != 0) {
+            val &= ~SERIAL_STOP_MASK;
+            val |= ((cfg->stop_bits & 0x7) << 22);
+        }
+
+        /* 2.3 Parity (Bits 25-27) */
+        if (cfg->parity != 0) {
+            val &= ~SERIAL_PARITY_MASK;
+            val |= ((cfg->parity & 0x7) << 25);
+        }
+
+        /* 2.4 Data Bits (Bits 28-30) */
+        if (cfg->data_bits != 0) {
+            val &= ~SERIAL_DATA_BITS_MASK;
+            val |= ((cfg->data_bits & 0x7) << 28);
+        }
+
+        /* 2.5 Bit Order (Bit 31) */
+        /* Nota: Limpiamos el bit (ponemos a 0) y si cfg->bit_order es 1, lo activamos */
+        val &= ~SERIAL_BIT_ORDER_MASK;
+        if (cfg->bit_order) {
+            val |= (1u << 31);
+        }
+
+        /* Escribir configuración de vuelta al hardware */
+        mmio_write32(GPIO0_BASE, val);
+        
+        /* Opcional: Forzar una espera pequeña si el hardware necesita asimilar el cambio de baudios */
+        for (volatile int i = 0; i < 1000; i++) __asm__("nop");
     }
 
-    sc = rtems_task_create(rtems_build_name('R','X','W','K'),
-                           50, RTEMS_MINIMUM_STACK_SIZE * 2,
-                           RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_worker_tid);
-
-    if (sc == RTEMS_SUCCESSFUL) {
-        transceiver_register_rx_worker_id(rx_worker_tid);
-        rtems_task_start(rx_worker_tid, rx_interrupt_worker_task, 0);
+    /* 3. Crear Mutex y Tarea Worker */
+    if (rx_mutex_id == 0) {
+        sc = rtems_semaphore_create(rtems_build_name('T','R','M','X'), 1,
+                                    RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &rx_mutex_id);
+        if (sc != RTEMS_SUCCESSFUL) return sc;
     }
-}
-/* Registrar callback (puede ser NULL para desregistrar) */
-void transceiver_set_rx_callback(transceiver_rx_cb_t cb, void *arg)
-{
-  rx_callback = cb;
-  rx_callback_arg = arg;
-}
 
-/* Consultas/lectura simples */
-size_t transceiver_rx_available(void)
-{
-  size_t c;
-  rx_lock();
-  c = rx_count;
-  rx_unlock();
-  return c;
-}
+    sc = rtems_task_create(rtems_build_name('T','R','W','K'), WORKER_PRIORITY, 
+                           WORKER_STACK, RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_worker_id);
+    if (sc != RTEMS_SUCCESSFUL) return sc;
 
-// size_t transceiver_rx_read(uint8_t *buf, size_t maxlen)
-// {
-//   return rx_queue_pop_bytes(buf, maxlen);
-// }
+    sc = rtems_task_start(rx_worker_id, Rx_Worker_Task, 0);
+    if (sc != RTEMS_SUCCESSFUL) return sc;
 
-/* Shutdown básico (no mata la tarea de forma elegante) */
-void transceiver_rx_shutdown(void)
-{
-  /* Podríamos rtems_task_delete(rx_poll_tid) si queremos forzar stop.
-     Por simplicidad aquí solo desactivamos callback y limpiamos buffer. */
-  rx_callback = NULL;
-  rx_lock();
-  rx_head = rx_tail = rx_count = 0;
-  rx_unlock();
+    /* 4. Inicializar Controlador de Interrupciones (AXI INTC) */
+    mmio_write32(INTC_BASE_ADDR + INTC_MER_OFFSET, 0x3); /* Master Enable */
+    mmio_write32(INTC_BASE_ADDR + INTC_IER_OFFSET, (1<<INTR_RX_BIT) | (1<<INTR_TX_BIT));
+
+    /* 5. Instalar ISR en RTEMS */
+    sc = rtems_interrupt_handler_install(IRQ_ID_PL_PS, "TRANS_ISR", 
+                                         RTEMS_INTERRUPT_UNIQUE, Transceiver_ISR, NULL);
+    
+    return sc;
 }
 
-/* EOF */
+void Transceiver_SetRxCallback(Transceiver_Event_Cb_t cb, void *arg) {
+    user_rx_cb = cb;
+    user_rx_arg = arg;
+}
+
+size_t Transceiver_Read(uint8_t *buf, size_t maxlen) {
+    size_t transferred = 0;
+    
+    rtems_semaphore_obtain(rx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+    while (transferred < maxlen && rx_count > 0) {
+        buf[transferred++] = rx_queue[rx_head];
+        rx_head = (rx_head + 1) % RX_QUEUE_SIZE;
+        rx_count--;
+    }
+    rtems_semaphore_release(rx_mutex_id);
+    
+    return transferred;
+}
+
+size_t Transceiver_Available(void) {
+    size_t c;
+    rtems_semaphore_obtain(rx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+    c = rx_count;
+    rtems_semaphore_release(rx_mutex_id);
+    return c;
+}
+
+/* Envío simple (bloqueante o con buffer TX, aquí simplificado directo para ejemplo) */
+int Transceiver_Send(const uint8_t *buf, size_t len) {
+    if (!buf || len == 0) return 0;
+    
+    /* Nota: Esta implementación básica usa busy-wait corto. 
+       Para producción real, usar buffer circular TX + interrupción TX similar a RX */
+    for (size_t i = 0; i < len; ++i) {
+        gpio_rmw(GPIO2_BASE, GPIO2_DATA_IN_MASK, buf[i]);
+        gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
+        for (volatile int k=0; k<100; ++k) __asm__ volatile("nop");
+        gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, 0);
+        
+        /* Esperar TX RDY (simple polling para evitar overflow) */
+        /* Omitido para brevedad, añadir timeout idealmente */
+        rtems_task_wake_after(1); 
+    }
+    return 0;
+}
+
+int Transceiver_SendString(const char *s) {
+    if (!s) return -1;
+    return Transceiver_Send((const uint8_t *)s, strlen(s));
+}
+
+void Transceiver_Shutdown(void) {
+    /* Deshabilitar IRQs HW */
+    mmio_write32(INTC_BASE_ADDR + INTC_IER_OFFSET, 0);
+    /* Borrar tarea worker */
+    if (rx_worker_id) rtems_task_delete(rx_worker_id);
+}
