@@ -1,0 +1,12 @@
+# 1. Ignorar TODO por defecto
+*
+
+# 2. Excepciones (¡No ignorar estos!)
+!main.c
+!transceiver.c
+!transceiver.h
+!transceiver_interrupt.c
+!transceiver_interrupt.h
+
+# 3. Importante: No ignorar el propio .gitignore para guardar esta regla
+!.gitignore
