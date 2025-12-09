@@ -491,19 +491,86 @@ static void rx_read_store_callback(void){
     }
 }
 
-void transceiver_rx_init_interrupt(void){
+// void transceiver_rx_init_interrupt(void){
+//     rtems_status_code sc;
+
+//   /* crear mutex si no existe */
+//   if (rx_mutex == 0) {
+//     sc = rtems_semaphore_create(rtems_build_name('R','X','M','X'),
+//                                 1, /* mutex inicial = 1 */
+//                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
+//                                 0, &rx_mutex);
+//     if (sc != RTEMS_SUCCESSFUL) return -1;
+//   }
+
+//     transceiver_register_rx_callback( (void (*)(void))rx_read_store_callback );
+// }
+
+static rtems_id rx_worker_tid = 0;
+
+/* Tarea WORKER: Duerme hasta que la ISR le avisa */
+static rtems_task rx_interrupt_worker_task(rtems_task_argument arg) {
+    (void)arg;
+    rtems_event_set events;
+    uint8_t tmp_buf[256];
+
+    /* Asegurar que RX está escuchando al arrancar */
+    transceiver_int_enable_rx(true);
+
+    for (;;) {
+        /* 1. DORMIR hasta recibir evento de la ISR (No consume CPU) */
+        rtems_event_receive(RTEMS_EVENT_0, RTEMS_WAIT | RTEMS_EVENT_ANY, RTEMS_NO_TIMEOUT, &events);
+
+        /* 2. LEER TODO lo que haya en la FIFO */
+        while ((gpio3_read_raw() & PS_OUT_EMPTY_MASK) == 0) {
+            uint32_t val = gpio3_read_raw();
+            uint8_t b = (uint8_t)(val & PS_OUT_DATA_MASK);
+
+            /* Guardar en cola */
+            rx_queue_push_one(b);
+
+            /* Confirmar al hardware */
+            fifo_consume_pulse();
+        }
+
+        /* 3. Procesar callbacks (si tienes alguno registrado como my_rx_cb) */
+        if (rx_callback) {
+            size_t n = rx_queue_pop_bytes(tmp_buf, sizeof(tmp_buf));
+            while (n > 0) {
+                rx_callback(tmp_buf, n, rx_callback_arg);
+                n = rx_queue_pop_bytes(tmp_buf, sizeof(tmp_buf));
+            }
+        }
+
+        /* 4. REACTIVAR la interrupción RX ahora que la FIFO está vacía */
+        transceiver_int_enable_rx(true);
+    }
+}
+
+/* Función de inicialización */
+void transceiver_rx_init_interrupt(void) {
     rtems_status_code sc;
 
-  /* crear mutex si no existe */
-  if (rx_mutex == 0) {
-    sc = rtems_semaphore_create(rtems_build_name('R','X','M','X'),
-                                1, /* mutex inicial = 1 */
-                                RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE,
-                                0, &rx_mutex);
-    if (sc != RTEMS_SUCCESSFUL) return -1;
-  }
+    /* Crear Mutex si no existe */
+    if (rx_mutex == 0) {
+        rtems_semaphore_create(rtems_build_name('R','X','M','X'), 1, 
+                               RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &rx_mutex);
+    }
 
-    transceiver_register_rx_callback( (void (*)(void))rx_read_store_callback );
+    /* Crear Tarea Worker (Prioridad alta para atender rápido) */
+    sc = rtems_task_create(rtems_build_name('R','X','W','K'),
+                           50, /* Prioridad alta */
+                           RTEMS_MINIMUM_STACK_SIZE * 2,
+                           RTEMS_DEFAULT_MODES, 
+                           RTEMS_DEFAULT_ATTRIBUTES, 
+                           &rx_worker_tid);
+
+    if (sc == RTEMS_SUCCESSFUL) {
+        transceiver_register_rx_worker_id(rx_worker_tid); /* Registrar ID */
+        rtems_task_start(rx_worker_tid, rx_interrupt_worker_task, 0); /* Arrancar */
+    } else {
+        printf("Error creando RX worker\n");
+    }
 }
 
 /* Registrar callback (puede ser NULL para desregistrar) */

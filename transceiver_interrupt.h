@@ -24,6 +24,10 @@ void transceiver_register_rx_callback(void (*cb)(void));
  */
 void transceiver_register_tx_callback(void (*cb)(void));
 
+void transceiver_register_rx_worker_id(rtems_id task_id); /* NUEVO: Para el Worker */
+
+/* Control de interrupciones (usado por el Worker) */
+void transceiver_int_enable_rx(bool enable);
 
 #ifdef __cplusplus
 }
