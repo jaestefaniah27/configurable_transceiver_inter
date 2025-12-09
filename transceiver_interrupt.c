@@ -38,7 +38,7 @@ static rtems_isr interrupt_service_routine(rtems_vector_number vector) {
     if (pending & (1 << INTR_RX_BIT)) {
         write_reg(INTC_IAR_OFFSET, (1 << INTR_RX_BIT));
         if (rx_handler) rx_handler();
-        //printf("interrupt_service_routine RX\n");
+        printf("interrupt_service_routine RX\n");
     }
     if (pending & (1 << INTR_TX_BIT)) {
         write_reg(INTC_IAR_OFFSET, (1 << INTR_TX_BIT));

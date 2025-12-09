@@ -115,9 +115,9 @@ rtems_task Init(rtems_task_argument arg) {
   transceiver_interrupt_init();
   register_tx_callback();
   /* En tu Init(), después de mapear PL etc. */
-  transceiver_rx_init_polling(5); /* poll cada 5 ms */
+  //transceiver_rx_init_polling(5); /* poll cada 5 ms */
   //transceiver_rx_init_interrupt();
-  transceiver_set_rx_callback(my_rx_cb, NULL);
+  //transceiver_set_rx_callback(my_rx_cb, NULL);
   //printf("RX iniciado. Callback registrado.\n");
   
   start_tx_task();
