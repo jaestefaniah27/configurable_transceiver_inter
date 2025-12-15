@@ -1,342 +1,281 @@
-/*
- * transceiver.c
- */
-
+/* transceiver.c */
 #include "transceiver.h"
-#include <rtems.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
-/* =========================================================================
- * 1. DEFINICIONES DE REGISTROS (Privado - Hardware Abstraction Layer)
- * ========================================================================= */
+/* === Mapa de Memoria Global === */
+#define TRANSCEIVER_BASE_START  0xA0000000
+#define TRANSCEIVER_STRIDE      0x100000     /* 1MB por bloque */
+#define INTC_GLOBAL_ADDR        0xA0E00000  /* Ubicado tras el último TRX (si son 14) */
+#define IRQ_VECTOR_ID           121         /* IRQ física PL->PS */
 
-/* Direcciones Base */
-#define GPIO0_BASE       0xA0000000u  /* Configuración Serial */
-#define GPIO1_BASE       0xA0010000u  /* Control de Flujo RX */
-#define GPIO2_BASE       0xA0020000u  /* Datos TX */
-#define GPIO3_BASE       0xA0030000u  /* Datos RX */
-#define INTC_BASE_ADDR   0xA0040000u  /* AXI Interrupt Controller */
+/* Offsets internos del bloque RTL */
+#define OFF_SETUP  0x00000
+#define OFF_RX     0x10000
+#define OFF_TX     0x20000
+#define OFF_STATUS 0x30000
 
-/* Offsets AXI INTC */
-#define INTC_ISR_OFFSET  0x00u
-#define INTC_IER_OFFSET  0x08u
-#define INTC_IAR_OFFSET  0x0Cu
-#define INTC_SIE_OFFSET  0x10u /* Set Enable */
-#define INTC_CIE_OFFSET  0x14u /* Clear Enable */
-#define INTC_MER_OFFSET  0x1Cu
+/* Registros AXI INTC */
+#define INTC_ISR   0x00
+#define INTC_IER   0x08
+#define INTC_IAR   0x0C
+#define INTC_SIE   0x10
+#define INTC_CIE   0x14
+#define INTC_MER   0x1C
 
-/* Máscaras y Bits */
-#define INTR_RX_BIT      1
-#define INTR_TX_BIT      0
-#define IRQ_ID_PL_PS     121   /* ZynqMP PL-PS IRQ */
+/* Máscaras de Bits del Hardware RTL */
+#define HW_RX_EMPTY_MASK  0x0200
+#define HW_RX_DATA_MASK   0x01FF
+#define HW_TX_RDY_MASK    0x2000
 
-/* Máscaras GPIO */
-#define PS_OUT_TX_RDY_MASK    0x2000u
-#define PS_OUT_EMPTY_MASK     0x0200u
-#define PS_OUT_DATA_MASK      0x01FFu
-
-#define GPIO1_DATA_READ_MASK  0x1u
-#define GPIO2_DATA_IN_MASK    0x01FFu
-#define GPIO2_TX_SEND_MASK    0x0200u
-
-/* Máscaras Configuración Serial */
+/* Máscaras (Asegúrate de tener esto arriba en transceiver.c) */
 #define SERIAL_BAUD_MASK      0x003FFFFFu
 #define SERIAL_STOP_MASK      0x01C00000u
 #define SERIAL_PARITY_MASK    0x0E000000u
 #define SERIAL_DATA_BITS_MASK 0x70000000u
 #define SERIAL_BIT_ORDER_MASK 0x80000000u
 
-/* Configuraciones de Software */
-#define RX_QUEUE_SIZE    (4 * 1024)
-#define TX_BUF_SIZE      256
-#define WORKER_PRIORITY  50
-#define WORKER_STACK     (RTEMS_MINIMUM_STACK_SIZE * 2)
+/* Array global de punteros a transceptores para que la ISR los encuentre */
+#define MAX_TRANSCEIVERS 16
+static Transceiver *g_instances[MAX_TRANSCEIVERS] = { NULL };
 
-/* =========================================================================
- * 2. VARIABLES GLOBALES (Privadas - Static)
- * ========================================================================= */
-
-/* Contexto RX */
-static uint8_t  rx_queue[RX_QUEUE_SIZE];
-static size_t   rx_head = 0;
-static size_t   rx_tail = 0;
-static size_t   rx_count = 0;
-static rtems_id rx_mutex_id = 0;
-static rtems_id rx_worker_id = 0;
-
-/* Contexto TX */
-static uint8_t  tx_buf[TX_BUF_SIZE];
-static size_t   tx_head = 0;
-static size_t   tx_tail = 0;
-static volatile bool tx_active = false;
-
-/* Callbacks */
-static Transceiver_Event_Cb_t user_rx_cb = NULL;
-static void *user_rx_arg = NULL;
-
-/* =========================================================================
- * 3. FUNCIONES HELPER (Low Level)
- * ========================================================================= */
-
-static inline void mmio_write32(uintptr_t addr, uint32_t val) {
-    *(volatile uint32_t *)addr = val;
-    __asm__ volatile("dmb sy" ::: "memory");
-}
-
-static inline uint32_t mmio_read32(uintptr_t addr) {
-    __asm__ volatile("dmb sy" ::: "memory");
+/* --- Helpers de Memoria --- */
+static inline uint32_t reg_read(uintptr_t addr) {
     return *(volatile uint32_t *)addr;
 }
-
-static void gpio_rmw(uintptr_t base, uint32_t mask, uint32_t val) {
-    uint32_t reg = mmio_read32(base);
-    reg &= ~mask;
-    reg |= (val & mask);
-    mmio_write32(base, reg);
+static inline void reg_write(uintptr_t addr, uint32_t val) {
+    *(volatile uint32_t *)addr = val;
 }
 
-/* Pulso para confirmar lectura al HW */
-static void fifo_consume_pulse(void) {
-    gpio_rmw(GPIO1_BASE, GPIO1_DATA_READ_MASK, GPIO1_DATA_READ_MASK);
-    /* Pequeña espera para asegurar que el HW lo pilla */
-    for (volatile int i = 0; i < 50; ++i) __asm__ volatile("nop");
-    gpio_rmw(GPIO1_BASE, GPIO1_DATA_READ_MASK, 0);
+/* --- Control de Interrupciones (Global INTC) --- */
+static void intc_enable_line(Transceiver *dev, uint32_t mask) {
+    reg_write(dev->intc_base + INTC_SIE, mask);
+}
+static void intc_disable_line(Transceiver *dev, uint32_t mask) {
+    reg_write(dev->intc_base + INTC_CIE, mask);
 }
 
-/* Control de Interrupción RX (Enable/Disable) */
-static void hw_int_enable_rx(bool enable) {
-    if (enable) {
-        mmio_write32(INTC_BASE_ADDR + INTC_SIE_OFFSET, (1 << INTR_RX_BIT));
-    } else {
-        mmio_write32(INTC_BASE_ADDR + INTC_CIE_OFFSET, (1 << INTR_RX_BIT));
-    }
-}
-
-/* =========================================================================
- * 4. RUTINA DE SERVICIO DE INTERRUPCIÓN (ISR - Top Half)
- * ========================================================================= */
-
-static rtems_isr Transceiver_ISR(rtems_vector_number vector) {
-    (void)vector;
-    uint32_t pending = mmio_read32(INTC_BASE_ADDR + INTC_ISR_OFFSET);
-
-    /* --- Manejo de Recepción (RX) --- */
-    if (pending & (1 << INTR_RX_BIT)) {
-        /* 1. Confirmar interrupción (ACK) */
-        mmio_write32(INTC_BASE_ADDR + INTC_IAR_OFFSET, (1 << INTR_RX_BIT));
-
-        /* 2. SILENCIAR: Deshabilitar interrupción RX para evitar bucle infinito.
-           El Worker la volverá a habilitar cuando limpie la FIFO. */
-        mmio_write32(INTC_BASE_ADDR + INTC_CIE_OFFSET, (1 << INTR_RX_BIT));
-
-        /* 3. Despertar al Worker (Bottom Half) */
-        if (rx_worker_id != 0) {
-            rtems_event_send(rx_worker_id, RTEMS_EVENT_0);
-        }
-    }
-
-    /* --- Manejo de Transmisión (TX) --- */
-    if (pending & (1 << INTR_TX_BIT)) {
-        mmio_write32(INTC_BASE_ADDR + INTC_IAR_OFFSET, (1 << INTR_TX_BIT));
-        
-        /* Lógica TX simple: enviar siguiente byte si hay */
-        if (tx_active) {
-             if (tx_head != tx_tail) {
-                /* Hay más datos, enviar siguiente (Implementación básica) */
-                uint8_t b = tx_buf[tx_tail];
-                tx_tail = (tx_tail + 1) % TX_BUF_SIZE;
-                
-                gpio_rmw(GPIO2_BASE, GPIO2_DATA_IN_MASK, b);
-                gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
-                for (volatile int k=0; k<50; ++k) __asm__ volatile("nop");
-                gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, 0);
-             } else {
-                 tx_active = false; /* Buffer vacío */
-             }
-        }
-    }
-}
-
-/* =========================================================================
- * 5. TAREA WORKER (Bottom Half)
- * ========================================================================= */
-
+/* --- Worker Task (Bottom Half) --- */
 static rtems_task Rx_Worker_Task(rtems_task_argument arg) {
-    (void)arg;
+    Transceiver *dev = (Transceiver *)arg;
     rtems_event_set events;
 
-    /* Inicio seguro: Habilitar RX */
-    hw_int_enable_rx(true);
+    /* Habilitar interrupción RX al arrancar */
+    intc_enable_line(dev, dev->mask_rx);
 
     for (;;) {
-        /* 1. Dormir hasta ser despertado por la ISR */
+        /* Dormir hasta aviso de la ISR */
         rtems_event_receive(RTEMS_EVENT_0, RTEMS_WAIT | RTEMS_EVENT_ANY, RTEMS_NO_TIMEOUT, &events);
 
-        /* 2. Bucle de Vaciado de FIFO Hardware */
-        /* Mientras la señal EMPTY (bit 9) sea 0 (Lógica Negativa: 0 = Hay dato) */
-        while ((mmio_read32(GPIO3_BASE) & PS_OUT_EMPTY_MASK) == 0) {
+        /* Vaciado de FIFO Hardware */
+        /* Leemos mientras el bit EMPTY (bit 9 de Status) sea 0 */
+        while ((reg_read(dev->addr_status) & HW_RX_EMPTY_MASK) == 0) {
             
-            /* Leer dato crudo */
-            uint32_t raw = mmio_read32(GPIO3_BASE);
-            uint8_t  byte = (uint8_t)(raw & PS_OUT_DATA_MASK);
+            uint32_t raw = reg_read(dev->addr_status);
+            uint8_t byte = (uint8_t)(raw & HW_RX_DATA_MASK);
 
-            /* Guardar en buffer circular (Protegido por Mutex) */
-            rtems_semaphore_obtain(rx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
-            if (rx_count < RX_QUEUE_SIZE) {
-                rx_queue[rx_tail] = byte;
-                rx_tail = (rx_tail + 1) % RX_QUEUE_SIZE;
-                rx_count++;
+            /* Guardar en Ring Buffer protegido */
+            rtems_semaphore_obtain(dev->mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+            if (dev->rx_count < dev->rx_buf_size) {
+                dev->rx_buffer[dev->rx_tail] = byte;
+                dev->rx_tail = (dev->rx_tail + 1) % dev->rx_buf_size;
+                dev->rx_count++;
             }
-            rtems_semaphore_release(rx_mutex_id);
+            rtems_semaphore_release(dev->mutex_id);
 
-            /* Confirmar lectura al HW */
-            fifo_consume_pulse();
+            /* ACK de lectura al HW (Pulso en registro RX) */
+            /* Escribir 1 y luego 0 en el bit 0 del registro RX */
+            uint32_t current_rx_reg = reg_read(dev->addr_rx);
+            reg_write(dev->addr_rx, current_rx_reg | 0x1);
+            /* Pequeña espera si es necesaria */
+            for(volatile int k=0; k<10; k++); 
+            reg_write(dev->addr_rx, current_rx_reg & ~0x1);
         }
 
-        /* 3. Notificar al usuario (si hay callback registrado) */
-        if (user_rx_cb) {
-            user_rx_cb(user_rx_arg);
+        /* Notificar usuario */
+        if (dev->rx_callback) {
+            dev->rx_callback(dev->rx_callback_arg);
         }
 
-        /* 4. Reactivar Interrupción RX */
-        hw_int_enable_rx(true);
+        /* Reactivar Interrupción RX en el INTC Global */
+        intc_enable_line(dev, dev->mask_rx);
     }
 }
 
-/* =========================================================================
- * 6. API PÚBLICA
- * ========================================================================= */
+/* --- ISR Maestra (Top Half) --- */
+/* Esta ISR atiende a TODOS los transceptores */
+static rtems_isr Master_ISR(void *arg) {
+    (void)arg;
+    /* Asumimos INTC Global en dirección fija o pasada por arg. Usamos la define por simplicidad aquí */
+    uintptr_t intc = INTC_GLOBAL_ADDR; 
+    
+    /* Leer estado de interrupciones pendientes */
+    uint32_t pending = reg_read(intc + INTC_ISR);
 
-rtems_status_code Transceiver_Init(const Transceiver_Config_t *cfg) {
+    /* Recorrer posibles transceptores activos */
+    for (int i = 0; i < MAX_TRANSCEIVERS; i++) {
+        Transceiver *dev = g_instances[i];
+        if (dev == NULL) continue;
+
+        /* Verificar RX (Bit par: 2*i) */
+        if (pending & dev->mask_rx) {
+            /* 1. ACK */
+            reg_write(intc + INTC_IAR, dev->mask_rx);
+            /* 2. DISABLE (Silenciar línea para evitar bucle, el worker la reactiva) */
+            reg_write(intc + INTC_CIE, dev->mask_rx);
+            /* 3. WAKE WORKER */
+            rtems_event_send(dev->worker_id, RTEMS_EVENT_0);
+        }
+
+        /* Verificar TX (Bit impar: 2*i + 1) */
+        /* (Implementar lógica TX similar si se desea) */
+        if (pending & dev->mask_tx) {
+            reg_write(intc + INTC_IAR, dev->mask_tx);
+            /* Notificar fin de transmisión si usas TX por interrupción */
+        }
+    }
+}
+
+/* --- Inicialización Global del INTC --- */
+void Transceiver_Global_INTC_Init(void) {
+    /* Reset y Enable Master del INTC Global */
+    reg_write(INTC_GLOBAL_ADDR + INTC_MER, 0x3); // Hardware Enable | Master Enable
+    reg_write(INTC_GLOBAL_ADDR + INTC_IER, 0x0); // Deshabilitar todo inicialmente
+    reg_write(INTC_GLOBAL_ADDR + INTC_IAR, 0xFFFFFFFF); // Limpiar pendientes
+
+    /* Instalar la ISR Maestra en el vector del Zynq */
+    rtems_interrupt_handler_install(IRQ_VECTOR_ID, "UART_Master", 
+                                    RTEMS_INTERRUPT_UNIQUE, 
+                                    Master_ISR, 
+                                    NULL);
+}
+
+/* --- Inicialización de Instancia --- */
+rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transceiver_Config_t *cfg) {
     rtems_status_code sc;
 
-    /* 1. Mapeo de memoria (externo o interno, asumimos hecho o llamar aquí) */
-    /* mmu_map_pl_axi_early(); */ 
+    if (id >= MAX_TRANSCEIVERS) return RTEMS_INVALID_ID;
 
-    /* 2. Configuración de Hardware (Baud, Parity, etc.) */
+    /* 1. Calcular Direcciones según el ID */
+    /* Base: 0xA0000000 + (ID * 0x10000) */
+    dev->id = id;
+    dev->base_addr = TRANSCEIVER_BASE_START + (id * TRANSCEIVER_STRIDE);
+    dev->intc_base = INTC_GLOBAL_ADDR;
+
+    dev->addr_setup  = dev->base_addr + OFF_SETUP;
+    dev->addr_rx     = dev->base_addr + OFF_RX;
+    dev->addr_tx     = dev->base_addr + OFF_TX;
+    dev->addr_status = dev->base_addr + OFF_STATUS;
+
+    /* 2. Calcular Máscaras de IRQ */
+    /* RX es bit 2*id (0, 2, 4...) */
+    /* TX es bit 2*id + 1 (1, 3, 5...) */
+    dev->mask_rx = (1 << (2 * id));
+    dev->mask_tx = (1 << (2 * id + 1));
+
+    /* 3. Inicializar Buffer Software */
+    dev->rx_buf_size = 4096;
+    dev->rx_buffer = malloc(dev->rx_buf_size); // O usar buffer estático si prefieres
+    dev->rx_head = 0; 
+    dev->rx_tail = 0; 
+    dev->rx_count = 0;
+
+    /* 4. Crear Recursos RTEMS */
+    sc = rtems_semaphore_create(rtems_build_name('T','R','X', '0'+id), 1, 
+                                RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &dev->mutex_id);
+    if (sc != RTEMS_SUCCESSFUL) return sc;
+
+    sc = rtems_task_create(rtems_build_name('W','K','R', '0'+id), 50, 
+                           RTEMS_MINIMUM_STACK_SIZE * 2,
+                           RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &dev->worker_id);
+    if (sc != RTEMS_SUCCESSFUL) return sc;
+
+    /* 5. Registrar instancia globalmente */
+    g_instances[id] = dev;
+
+    /* 6. Configurar Hardware (Baudios, etc.) usando dev->addr_setup */
+/* 6. Configurar Hardware (Baudios, etc.) usando dev->addr_setup */
     if (cfg) {
-        /* Leer estado actual del registro de configuración (GPIO0) */
-        uint32_t val = mmio_read32(GPIO0_BASE);
+        /* Leemos el estado actual para no machacar bits reservados si los hubiera */
+        uint32_t val = reg_read(dev->addr_setup);
 
-        /* 2.1 Baud Rate (Bits 0-21) */
-        if (cfg->baud != 0) {
-            val &= ~SERIAL_BAUD_MASK;
-            val |= (cfg->baud & SERIAL_BAUD_MASK);
+        /* --- 1. Baud Rate (Bits 0-21) --- */
+        if (cfg->baud) {
+            val &= ~SERIAL_BAUD_MASK;           /* Limpiar bits viejos */
+            val |= (cfg->baud & SERIAL_BAUD_MASK); /* Poner nuevos */
         }
 
-        /* 2.2 Stop Bits (Bits 22-24) */
-        if (cfg->stop_bits != 0) {
-            val &= ~SERIAL_STOP_MASK;
-            val |= ((cfg->stop_bits & 0x7) << 22);
-        }
+        /* --- 2. Stop Bits (Bits 22-24) --- */
+        /* Se asume que cfg->stop_bits contiene el código de hardware (ej: 2) */
+        val &= ~SERIAL_STOP_MASK;
+        val |= ((cfg->stop_bits & 0x7) << 22);
 
-        /* 2.3 Parity (Bits 25-27) */
-        if (cfg->parity != 0) {
-            val &= ~SERIAL_PARITY_MASK;
-            val |= ((cfg->parity & 0x7) << 25);
-        }
+        /* --- 3. Parity (Bits 25-27) --- */
+        val &= ~SERIAL_PARITY_MASK;
+        val |= ((cfg->parity & 0x7) << 25);
 
-        /* 2.4 Data Bits (Bits 28-30) */
-        if (cfg->data_bits != 0) {
-            val &= ~SERIAL_DATA_BITS_MASK;
-            val |= ((cfg->data_bits & 0x7) << 28);
-        }
+        /* --- 4. Data Bits (Bits 28-30) --- */
+        val &= ~SERIAL_DATA_BITS_MASK;
+        val |= ((cfg->data_bits & 0x7) << 28);
 
-        /* 2.5 Bit Order (Bit 31) */
-        /* Nota: Limpiamos el bit (ponemos a 0) y si cfg->bit_order es 1, lo activamos */
-        val &= ~SERIAL_BIT_ORDER_MASK;
+        /* --- 5. Bit Order (Bit 31) --- */
+        /* 0 = LSB First (Normal), 1 = MSB First */
         if (cfg->bit_order) {
-            val |= (1u << 31);
+            val |= SERIAL_BIT_ORDER_MASK;
+        } else {
+            val &= ~SERIAL_BIT_ORDER_MASK;
         }
 
-        /* Escribir configuración de vuelta al hardware */
-        mmio_write32(GPIO0_BASE, val);
-        
-        /* Opcional: Forzar una espera pequeña si el hardware necesita asimilar el cambio de baudios */
-        for (volatile int i = 0; i < 1000; i++) __asm__("nop");
+        /* Escribir la configuración en el hardware */
+        reg_write(dev->addr_setup, val);
+
+        /* Espera técnica para que el divisor de frecuencia interno se estabilice */
+        for(volatile int k=0; k<1000; k++);
     }
 
-    /* 3. Crear Mutex y Tarea Worker */
-    if (rx_mutex_id == 0) {
-        sc = rtems_semaphore_create(rtems_build_name('T','R','M','X'), 1,
-                                    RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &rx_mutex_id);
-        if (sc != RTEMS_SUCCESSFUL) return sc;
-    }
+    /* 7. Arrancar Worker (pasándole 'dev' como argumento) */
+    sc = rtems_task_start(dev->worker_id, Rx_Worker_Task, (rtems_task_argument)dev);
 
-    sc = rtems_task_create(rtems_build_name('T','R','W','K'), WORKER_PRIORITY, 
-                           WORKER_STACK, RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &rx_worker_id);
-    if (sc != RTEMS_SUCCESSFUL) return sc;
-
-    sc = rtems_task_start(rx_worker_id, Rx_Worker_Task, 0);
-    if (sc != RTEMS_SUCCESSFUL) return sc;
-
-    /* 4. Inicializar Controlador de Interrupciones (AXI INTC) */
-    mmio_write32(INTC_BASE_ADDR + INTC_MER_OFFSET, 0x3); /* Master Enable */
-    mmio_write32(INTC_BASE_ADDR + INTC_IER_OFFSET, (1<<INTR_RX_BIT) | (1<<INTR_TX_BIT));
-
-    /* 5. Instalar ISR en RTEMS */
-    sc = rtems_interrupt_handler_install(IRQ_ID_PL_PS, "TRANS_ISR", 
-                                         RTEMS_INTERRUPT_UNIQUE, Transceiver_ISR, NULL);
-    
     return sc;
 }
 
-void Transceiver_SetRxCallback(Transceiver_Event_Cb_t cb, void *arg) {
-    user_rx_cb = cb;
-    user_rx_arg = arg;
-}
-
-size_t Transceiver_Read(uint8_t *buf, size_t maxlen) {
-    size_t transferred = 0;
-    
-    rtems_semaphore_obtain(rx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
-    while (transferred < maxlen && rx_count > 0) {
-        buf[transferred++] = rx_queue[rx_head];
-        rx_head = (rx_head + 1) % RX_QUEUE_SIZE;
-        rx_count--;
+size_t Transceiver_Read(Transceiver *dev, uint8_t *buf, size_t maxlen) {
+    size_t got = 0;
+    rtems_semaphore_obtain(dev->mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+    while (got < maxlen && dev->rx_count > 0) {
+        buf[got++] = dev->rx_buffer[dev->rx_head];
+        dev->rx_head = (dev->rx_head + 1) % dev->rx_buf_size;
+        dev->rx_count--;
     }
-    rtems_semaphore_release(rx_mutex_id);
-    
-    return transferred;
+    rtems_semaphore_release(dev->mutex_id);
+    return got;
 }
 
-size_t Transceiver_Available(void) {
-    size_t c;
-    rtems_semaphore_obtain(rx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
-    c = rx_count;
-    rtems_semaphore_release(rx_mutex_id);
-    return c;
-}
-
-/* Envío simple (bloqueante o con buffer TX, aquí simplificado directo para ejemplo) */
-int Transceiver_Send(const uint8_t *buf, size_t len) {
-    if (!buf || len == 0) return 0;
-    
-    /* Nota: Esta implementación básica usa busy-wait corto. 
-       Para producción real, usar buffer circular TX + interrupción TX similar a RX */
-    for (size_t i = 0; i < len; ++i) {
-        gpio_rmw(GPIO2_BASE, GPIO2_DATA_IN_MASK, buf[i]);
-        gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, GPIO2_TX_SEND_MASK);
-        for (volatile int k=0; k<100; ++k) __asm__ volatile("nop");
-        gpio_rmw(GPIO2_BASE, GPIO2_TX_SEND_MASK, 0);
+int Transceiver_SendString(Transceiver *dev, const char *s) {
+    /* Implementación básica de envío usando dev->addr_tx */
+    while (*s) {
+        /* Escribir dato */
+        uint32_t current_val = reg_read(dev->addr_tx);
+        // Limpiar bits de datos previos y poner nuevo
+        current_val &= ~0x1FF; 
+        current_val |= (*s & 0xFF);
+        reg_write(dev->addr_tx, current_val);
         
-        /* Esperar TX RDY (simple polling para evitar overflow) */
-        /* Omitido para brevedad, añadir timeout idealmente */
-        rtems_task_wake_after(1); 
+        /* Pulso de envío (Bit 9) */
+        reg_write(dev->addr_tx, current_val | 0x200); 
+        for(volatile int k=0; k<50; k++); 
+        reg_write(dev->addr_tx, current_val & ~0x200);
+        
+        /* Esperar TX RDY (Bit 13 en Status) */
+        while( (reg_read(dev->addr_status) & 0x2000) == 0 );
+        
+        s++;
     }
     return 0;
 }
 
-int Transceiver_SendString(const char *s) {
-    if (!s) return -1;
-    return Transceiver_Send((const uint8_t *)s, strlen(s));
-}
-
-void Transceiver_Shutdown(void) {
-    /* Deshabilitar IRQs HW */
-    mmio_write32(INTC_BASE_ADDR + INTC_IER_OFFSET, 0);
-    /* Borrar tarea worker */
-    if (rx_worker_id) rtems_task_delete(rx_worker_id);
+void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg) {
+    dev->rx_callback = cb;
+    dev->rx_callback_arg = arg;
 }
