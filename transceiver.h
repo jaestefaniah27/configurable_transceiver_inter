@@ -6,6 +6,87 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <rtems.h>
+/* =========================================================================
+ * STOP BITS)
+ * ========================================================================= */
+
+#define TRANSCEIVER_STOP_BITS_1     0 /* 1 Stop Bit */
+#define TRANSCEIVER_STOP_BITS_1_5   2 /* 1.5 Stop Bits */
+#define TRANSCEIVER_STOP_BITS_2     3 /* 2 Stop Bits */
+/* =========================================================================
+ * PARITY MODES
+ * ========================================================================= */
+#define TRANSCEIVER_PARITY_EVEN    0  /* Paridad Par */
+#define TRANSCEIVER_PARITY_ODD     1  /* Paridad Impar */
+#define TRANSCEIVER_PARITY_MARK    2  /* Mark (Bit de paridad siempre 1) */
+#define TRANSCEIVER_PARITY_SPACE   3  /* Space (Bit de paridad siempre 0) */
+#define TRANSCEIVER_PARITY_NONE    4  /* Sin Paridad (Desactivada) */
+/* =========================================================================
+ * BAUD RATE SELECTORS (NCO LUT INDICES)
+ * ========================================================================= */
+/* --- Low Frequencies --- */
+#define TRANSCEIVER_BAUD_50        0
+#define TRANSCEIVER_BAUD_75        1
+#define TRANSCEIVER_BAUD_110       2
+#define TRANSCEIVER_BAUD_134       3   /* ~134.5 */
+#define TRANSCEIVER_BAUD_150       4
+#define TRANSCEIVER_BAUD_200       5
+#define TRANSCEIVER_BAUD_300       6
+#define TRANSCEIVER_BAUD_600       7
+#define TRANSCEIVER_BAUD_1200      8
+#define TRANSCEIVER_BAUD_1800      9
+#define TRANSCEIVER_BAUD_2000      10
+#define TRANSCEIVER_BAUD_2400      11
+#define TRANSCEIVER_BAUD_3600      12
+#define TRANSCEIVER_BAUD_4800      13
+#define TRANSCEIVER_BAUD_7200      14
+
+/* --- Common Standards --- */
+#define TRANSCEIVER_BAUD_9600      15  /* Arduino / Standard */
+#define TRANSCEIVER_BAUD_12000     16
+#define TRANSCEIVER_BAUD_14400     17
+#define TRANSCEIVER_BAUD_19200     18
+#define TRANSCEIVER_BAUD_28800     19
+
+/* --- Special Protocols --- */
+#define TRANSCEIVER_BAUD_31250     20  /* MIDI */
+#define TRANSCEIVER_BAUD_38400     21
+#define TRANSCEIVER_BAUD_50000     22
+#define TRANSCEIVER_BAUD_56000     23  /* Legacy Modems */
+#define TRANSCEIVER_BAUD_57600     24
+
+/* --- High Speed --- */
+#define TRANSCEIVER_BAUD_64000     25
+#define TRANSCEIVER_BAUD_74400     26
+#define TRANSCEIVER_BAUD_74880     27  /* ESP8266 Boot */
+#define TRANSCEIVER_BAUD_76800     28
+#define TRANSCEIVER_BAUD_115200    29  /* PC Serial Standard */
+#define TRANSCEIVER_BAUD_128000    30
+#define TRANSCEIVER_BAUD_153600    31
+#define TRANSCEIVER_BAUD_200000    32
+#define TRANSCEIVER_BAUD_230400    33
+#define TRANSCEIVER_BAUD_250000    34  /* DMX512 Lighting */
+#define TRANSCEIVER_BAUD_256000    35
+#define TRANSCEIVER_BAUD_312500    36
+#define TRANSCEIVER_BAUD_400000    37
+#define TRANSCEIVER_BAUD_460800    38
+#define TRANSCEIVER_BAUD_500000    39
+#define TRANSCEIVER_BAUD_576000    40
+#define TRANSCEIVER_BAUD_614400    41
+#define TRANSCEIVER_BAUD_750000    42
+#define TRANSCEIVER_BAUD_921600    43
+
+/* --- Megabaud Rates --- */
+#define TRANSCEIVER_BAUD_1M        44
+#define TRANSCEIVER_BAUD_1_152M    45
+#define TRANSCEIVER_BAUD_1_5M      46
+#define TRANSCEIVER_BAUD_1_8432M   47
+#define TRANSCEIVER_BAUD_2M        48
+#define TRANSCEIVER_BAUD_2_5M      49
+#define TRANSCEIVER_BAUD_3M        50
+#define TRANSCEIVER_BAUD_3_5M      51
+#define TRANSCEIVER_BAUD_3_6864M   52
+#define TRANSCEIVER_BAUD_4M        53  /* Max Recommended */
 
 #ifdef __cplusplus
 extern "C" {
