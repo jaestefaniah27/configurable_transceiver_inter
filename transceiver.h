@@ -1,14 +1,9 @@
-/*
- * transceiver.h
- *
- * Driver profesional para Transceptor PL-UART sobre RTEMS (ZynqMP).
- * Implementación: Interrupción + Worker Task (Top Half / Bottom Half).
- */
-
+/* transceiver.h */
 #ifndef TRANSCEIVER_H
 #define TRANSCEIVER_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <rtems.h>
 
@@ -16,71 +11,81 @@
 extern "C" {
 #endif
 
-/* --- Configuración --- */
-
+/* === Configuración === */
 typedef struct {
-    uint32_t baud;         /* Ej: 115200 */
-    uint32_t data_bits;    /* Ej: 0..3 -> 5..9mapping */
-    uint32_t parity;       /* Ej: 4 = None */
-    uint32_t stop_bits;    /* Ej: 2 */
-    uint32_t bit_order;    /* 0 o 1 */
+    uint32_t baud;
+    uint32_t data_bits;
+    uint32_t parity;
+    uint32_t stop_bits;
+    uint32_t bit_order;
 } Transceiver_Config_t;
 
-/* --- API de Inicialización --- */
+/* === Objeto Transceiver (Handle) === */
+typedef struct {
+    /* -- Hardware Address Map -- */
+    uint32_t id;                /* Índice del transceptor (0, 1, ... 13) */
+    uintptr_t base_addr;        /* Dirección base de esta instancia (ej: 0xA0000000) */
+    uintptr_t intc_base;        /* Dirección del INTC Global compartido */
+    
+    /* Offsets calculados */
+    uintptr_t addr_setup;       /* Base + 0x0000 */
+    uintptr_t addr_rx;          /* Base + 0x1000 */
+    uintptr_t addr_tx;          /* Base + 0x2000 */
+    uintptr_t addr_status;      /* Base + 0x3000 */
+
+    /* -- Interrupt info -- */
+    uint32_t mask_rx;           /* Bitmask para RX en el INTC Global */
+    uint32_t mask_tx;           /* Bitmask para TX en el INTC Global */
+
+    /* -- Software State -- */
+    rtems_id worker_id;         /* ID de la tarea worker */
+    rtems_id mutex_id;          /* ID del mutex para el buffer RX */
+    
+    uint8_t *rx_buffer;         /* Puntero al buffer circular (allocado dinámicamente o estático) */
+    size_t rx_buf_size;
+    volatile size_t rx_head;
+    size_t rx_tail;
+    volatile size_t rx_count;
+
+    /* Callback de usuario */
+    void (*rx_callback)(void *arg);
+    void *rx_callback_arg;
+
+} Transceiver;
+
+/* === API Pública === */
 
 /**
- * @brief Inicializa el hardware, interrupciones y tareas del transceptor.
- * @param cfg Puntero a estructura de configuración (puede ser NULL para defaults).
- * @return RTEMS_SUCCESSFUL si todo fue bien.
+ * @brief Inicializa una instancia del transceptor.
+ * @param dev Puntero a la estructura Transceiver a inicializar.
+ * @param id ID del transceptor (0 a 13). Calcula direcciones automáticamente.
+ * @param cfg Configuración de baudios, paridad, etc.
  */
-rtems_status_code Transceiver_Init(const Transceiver_Config_t *cfg);
+rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transceiver_Config_t *cfg);
 
 /**
- * @brief Cierra el driver, deshabilita interrupciones y limpia recursos.
+ * @brief Lee datos del buffer de recepción.
  */
-void Transceiver_Shutdown(void);
-
-
-/* --- API de Transmisión (TX) --- */
+size_t Transceiver_Read(Transceiver *dev, uint8_t *buf, size_t maxlen);
 
 /**
- * @brief Envía un buffer de bytes.
- * @return 0 en éxito, -1 en error/timeout.
+ * @brief Envía una cadena (bloqueante o no, según implementación).
  */
-int Transceiver_Send(const uint8_t *buf, size_t len);
+int Transceiver_SendString(Transceiver *dev, const char *s);
 
 /**
- * @brief Wrapper para enviar cadenas terminadas en null.
+ * @brief Registra callback de recepción.
  */
-int Transceiver_SendString(const char *s);
-
-
-/* --- API de Recepción (RX) --- */
-
-/* Tipo de callback para notificación (no recibe datos, solo avisa) */
-typedef void (*Transceiver_Event_Cb_t)(void *arg);
+void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg);
 
 /**
- * @brief Registra un callback que será llamado cuando lleguen nuevos datos.
- * El callback se ejecuta en contexto de tarea (seguro).
+ * @brief Función maestra para inicializar el controlador de interrupciones global.
+ * Se debe llamar UNA sola vez al inicio, antes de init los transceptores.
  */
-void Transceiver_SetRxCallback(Transceiver_Event_Cb_t cb, void *arg);
-
-/**
- * @brief Lee datos del buffer interno del driver.
- * @param buf Buffer de destino.
- * @param maxlen Tamaño máximo a leer.
- * @return Número de bytes leídos.
- */
-size_t Transceiver_Read(uint8_t *buf, size_t maxlen);
-
-/**
- * @brief Consulta cuántos bytes hay disponibles en el buffer.
- */
-size_t Transceiver_Available(void);
+void Transceiver_Global_INTC_Init(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* TRANSCEIVER_H */
+#endif

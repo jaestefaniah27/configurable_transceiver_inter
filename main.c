@@ -1,11 +1,11 @@
 /*
  * main.c
- *
- * Aplicación de prueba para el Driver Profesional del Transceptor.
+ * Sistema Multi-Transceptor (14 Canales) sobre RTEMS.
  *
  * Funcionalidad:
- * 1. RX: Lo que llega por el Transceptor (PL) se imprime en la consola RTEMS.
- * 2. TX: Lo que escribes en la consola RTEMS (USB) se envía por el Transceptor.
+ * 1. Inicializa 14 transceptores en paralelo (Base 0xA0000000).
+ * 2. RX: Muestra por consola lo que llega, indicando de qué UART vino.
+ * 3. TX: Permite enviar mensajes a una UART específica desde la consola USB.
  */
 
 #include <rtems.h>
@@ -16,151 +16,204 @@
 
 #include "transceiver.h"
 
-#define CMD_BUF_SZ 512
+/* Definiciones del Hardware (Coinciden con tu script TCL) */
+#define NUM_TRANSCEIVERS      14
+// #define TRANSCEIVER_BASE_ADDR 0xA0000000
+// #define TRANSCEIVER_STRIDE    0x100000     /* 1MB por bloque */
+// #define INTC_GLOBAL_BASE      (TRANSCEIVER_BASE_ADDR + (NUM_TRANSCEIVERS * TRANSCEIVER_STRIDE))
 
-/* Helper para asegurar que el texto sale por consola inmediatamente */
-static void print_safe(const char *s) {
-    fputs(s, stdout);
-    fflush(stdout);
-}
+/* Objeto global para los 14 transceptores */
+static Transceiver uarts[NUM_TRANSCEIVERS];
+
+/* Configuración común para todos (115200 8N1) */
+static const Transceiver_Config_t cfg = {
+    .baud = 115200, .data_bits = 3, .parity = 4, .stop_bits = 2, .bit_order = 0
+};
 
 /* =========================================================================
- * 1. CALLBACK DE RECEPCIÓN (Se ejecuta cuando llega algo al Transceptor)
+ * 1. CALLBACK DE RECEPCIÓN (Se ejecuta cuando llega algo a CUALQUIER UART)
  * ========================================================================= */
-static void On_Transceiver_Data_Received(void *arg) {
-    (void)arg;
-    uint8_t buffer[128];
+/* Añadir esto al principio de main.c, junto a los otros defines */
+#define APP_LINE_BUF_SIZE 1024
+
+/* Estructura para gestionar el buffer de cada canal independientemente */
+typedef struct {
+    char buf[APP_LINE_BUF_SIZE];
+    size_t idx;
+} AppLineBuffer;
+
+/* Array estático para guardar el estado de los 14 canales */
+static AppLineBuffer rx_lines[NUM_TRANSCEIVERS]; 
+
+static void on_rx_data(void *arg) {
+    Transceiver *dev = (Transceiver *)arg;
+    
+    /* 1. Obtenemos el buffer correspondiente a ESTE transceptor */
+    AppLineBuffer *line = &rx_lines[dev->id];
+    
+    uint8_t temp_buf[64]; /* Buffer temporal para sacar datos del driver */
     size_t n;
 
-    /* Drenamos el buffer del driver hasta que esté vacío */
+    /* 2. Drenamos todo lo que tenga el driver disponible */
     do {
-        /* Usamos la API pública para leer del buffer interno */
-        n = Transceiver_Read(buffer, sizeof(buffer));
+        n = Transceiver_Read(dev, temp_buf, sizeof(temp_buf));
         
-        if (n > 0) {
-            /* Imprimimos lo recibido. 
-               Nota: Si recibes binario puro, considera usar un hexdump. 
-               Aquí asumimos texto para ver "Hola Mundo". */
-            //printf("\n[RX PL -> PS] (%d bytes): ", (int)n);
-            fwrite(buffer, 1, n, stdout);
-            //printf("\n");
-            fflush(stdout);
+        for (size_t i = 0; i < n; i++) {
+            char c = (char)temp_buf[i];
+
+            /* A. Si es salto de línea: Terminar y Mostrar */
+            if (c == '\n' || c == '\r') {
+                if (line->idx > 0) { // Solo imprimir si hay algo acumulado
+                    line->buf[line->idx] = '\0'; // Null-termination
+                    printf("[RX UART %02d]: %s\n", (unsigned int)dev->id, line->buf);
+                    line->idx = 0; // Resetear índice para la siguiente frase
+                }
+            } 
+            /* B. Si es un carácter normal: Acumular */
+            else {
+                if (line->idx < (APP_LINE_BUF_SIZE - 1)) {
+                    line->buf[line->idx++] = c;
+                } 
+                /* C. Protección Anti-Overflow: Si se llena sin \n, forzamos impresión */
+                else {
+                    line->buf[line->idx] = '\0';
+                    printf("[RX UART %02d PARCIAL]: %s\n", (unsigned int)dev->id, line->buf);
+                    line->idx = 0; // Reset y guardamos el carácter actual en el nuevo buffer
+                    line->buf[line->idx++] = c;
+                }
+            }
         }
     } while (n > 0);
 }
 
 /* =========================================================================
- * 2. TAREA DE TRANSMISIÓN (Lee Consola USB -> Envía a Transceptor)
+ * 2. TAREA DE CONSOLA (Parsea comandos y envía)
  * ========================================================================= */
 static rtems_task Tx_Console_Task(rtems_task_argument arg) {
     (void)arg;
-    char buf[CMD_BUF_SZ];
+    char input_buf[512];
+    char *cmd_ptr;
+    char *msg_ptr;
+    int target_id;
 
-    print_safe("\n--------------------------------------------------\n");
-    print_safe(" TAREA TX ARRANCADA\n");
-    print_safe(" Escribe texto y pulsa ENTER para enviarlo por el PL.\n");
-    print_safe(" Escribe 'EXIT' para detener esta tarea.\n");
-    print_safe("--------------------------------------------------\n\n");
+    printf("\n=======================================================\n");
+    printf(" CONSOLA DE CONTROL MULTI-TRANSCEPTOR\n");
+    printf("-------------------------------------------------------\n");
+    printf(" Formato: <ID> <MENSAJE>\n");
+    printf(" Ejemplos:\n");
+    printf("   '0 Hola'      -> Envia 'Hola' por UART 0\n");
+    printf("   '12 Status'   -> Envia 'Status' por UART 12\n");
+    printf("   'ALL Reset'   -> Envia 'Reset' por TODAS las UARTs\n");
+    printf("=======================================================\n\n");
 
     for (;;) {
-        /* 1. Bloqueante: Espera a que el usuario escriba algo en la consola USB */
-        if (fgets(buf, sizeof(buf), stdin) == NULL) {
+        /* Prompt */
+        printf("CMD> ");
+        fflush(stdout);
+
+        /* Leer línea de la consola USB */
+        if (fgets(input_buf, sizeof(input_buf), stdin) == NULL) {
             rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(100));
             continue;
         }
 
-        /* 2. Limpieza: Eliminar saltos de línea (\n o \r) al final */
-        size_t len = strlen(buf);
-        while (len > 0 && buf[len-1] == '\r') {
-            buf[--len] = '\0';
+        /* Limpiar salto de línea al final */
+        input_buf[strcspn(input_buf, "\r")] = 0;
+
+        /* Ignorar líneas vacías */
+        if (strlen(input_buf) == 0) continue;
+
+        /* Separar ID del Mensaje */
+        cmd_ptr = strtok(input_buf, " "); // Primer token (ID)
+        msg_ptr = strtok(NULL, "");       // Resto de la línea (Mensaje)
+
+        if (msg_ptr == NULL) {
+            printf("Error: Falta el mensaje. Uso: <ID> <MENSAJE>\n");
+            continue;
         }
 
-        /* Si era una línea vacía, ignorar */
-        if (len == 0) continue;
-
-        /* 3. Comando especial de salida */
-        if (strcmp(buf, "EXIT") == 0) {
-            print_safe("Finalizando tarea de consola...\n");
-            rtems_task_delete(RTEMS_SELF);
+        /* --- CASO 1: Enviar a TODOS --- */
+        if (strcasecmp(cmd_ptr, "ALL") == 0) {
+            printf("Enviando a las %d UARTs...\n", NUM_TRANSCEIVERS);
+            for (int i = 0; i < NUM_TRANSCEIVERS; i++) {
+                Transceiver_SendString(&uarts[i], msg_ptr);
+                // Transceiver_SendString(&uarts[i], "\r\n"); // Opcional: añadir CR/LF
+            }
+            continue;
         }
 
-        /* 4. Enviar usando el nuevo Driver Profesional */
-        int res = Transceiver_SendString(buf);
+        /* --- CASO 2: Enviar a ID específico --- */
+        /* Validar que el ID sea un número */
+        char *endptr;
+        target_id = strtoul(cmd_ptr, &endptr, 10);
 
-        if (res == 0) {
-            printf("[TX PS -> PL] Enviado: '%s'", buf);
+        if (*endptr != '\0') {
+            printf("Error: ID '%s' no valido.\n", cmd_ptr);
+            continue;
+        }
+
+        if (target_id >= 0 && target_id < NUM_TRANSCEIVERS) {
+            /* ¡ENVÍO REAL! */
+            Transceiver_SendString(&uarts[target_id], msg_ptr);
+            // Transceiver_SendString(&uarts[target_id], "\r\n"); 
+            printf("Tx -> UART %d: OK\n", target_id);
         } else {
-            printf("[TX ERROR] Fallo al enviar.\n");
+            printf("Error: ID %d fuera de rango (0-%d)\n", target_id, NUM_TRANSCEIVERS - 1);
         }
-        
-        fflush(stdout);
-    }
-}
-
-/* Helper para arrancar la tarea TX */
-static void Start_Console_Task(void) {
-    rtems_status_code sc;
-    rtems_id tid;
-
-    sc = rtems_task_create(rtems_build_name('C','O','N','S'), 
-                           80, /* Prioridad menor que el driver (50) */
-                           RTEMS_MINIMUM_STACK_SIZE * 4,
-                           RTEMS_DEFAULT_MODES, 
-                           RTEMS_DEFAULT_ATTRIBUTES, 
-                           &tid);
-    
-    if (sc == RTEMS_SUCCESSFUL) {
-        rtems_task_start(tid, Tx_Console_Task, 0);
-    } else {
-        printf("Error creando tarea de consola: %s\n", rtems_status_text(sc));
     }
 }
 
 /* =========================================================================
- * 3. TAREA INIT (Inicialización del Sistema)
+ * 3. INICIALIZACIÓN DEL SISTEMA
  * ========================================================================= */
 rtems_task Init(rtems_task_argument arg) {
     (void)arg;
     rtems_status_code sc;
 
-    /* 1. Mapeo de memoria (Crítico para ZynqMP) */
-    /* Asegúrate de tener el prototipo o el include donde esté definida */
-    extern void mmu_map_pl_axi_early(void); 
+    /* Mapeo de Memoria (Necesario para acceder al PL) */
+    extern void mmu_map_pl_axi_early(void);
     mmu_map_pl_axi_early();
 
-    /* Espera de estabilización */
-    rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(50));
+    printf("\n=== ARRANQUE SISTEMA ZCU102 (14 UARTs) ===\n");
 
-    printf("\n=== INICIANDO SISTEMA RTEMS + TRANSCEIVER ===\n");
+    /* 1. Inicializar el INTC Global (Paso Crítico Único) */
+    /* Esto habilita el controlador maestro que escucha a las 14 UARTs */
+    Transceiver_Global_INTC_Init();
+    printf("INTC Global en 0xA0E00000: Inicializado.\n");
 
-    /* 2. Configuración del Driver */
-    Transceiver_Config_t cfg = {
-        .baud = 115200,
-        .data_bits = 3, /* Según tu lógica: 3 map a 8 bits */
-        .parity = 4,    /* 4 map a None */
-        .stop_bits = 2, /* 2 map a 1 stop bit (o lo que tengas definido) */
-        .bit_order = 0
-    };
+    /* 2. Bucle de Inicialización de Transceptores */
+    for (int i = 0; i < NUM_TRANSCEIVERS; i++) {
+        /* Esta función calcula las direcciones automáticamente basándose en el ID */
+        /* Base = 0xA0000000 + (i * 0x10000) */
+        sc = Transceiver_Init(&uarts[i], i, &cfg);
 
-    /* 3. Inicializar Driver (Internamente crea Worker, Mutex e Interrupciones) */
-    sc = Transceiver_Init(&cfg);
-    if (sc != RTEMS_SUCCESSFUL) {
-        printf("PANIC: No se pudo iniciar el Transceptor. Error: %d\n", sc);
-        exit(1);
+        if (sc == RTEMS_SUCCESSFUL) {
+            /* Registrar callback para recibir datos */
+            Transceiver_SetRxCallback(&uarts[i], on_rx_data, &uarts[i]);
+            
+            /* Saludo opcional por el cable al arrancar */
+            char boot_msg[64];
+            sprintf(boot_msg, "UART %d Lista.\r\n", i);
+            Transceiver_SendString(&uarts[i], boot_msg);
+            
+            printf("UART %02d [OK] Base: 0x%08lX\n", i, (unsigned long)uarts[i].base_addr);
+        } else {
+            printf("UART %02d [FALLO] Error código: %d\n", i, sc);
+        }
     }
-    printf("Driver Transceiver: OK (IRQ + Worker)\n");
 
-    /* 4. Registrar Callback de RX */
-    /* Cuando llegue un dato, el driver llamará a esta función automáticamente */
-    Transceiver_SetRxCallback(On_Transceiver_Data_Received, NULL);
-
-    /* 5. Arrancar la tarea que lee de la consola USB */
-    Start_Console_Task();
-
-    /* 6. La tarea Init se duerme para siempre (o actúa como watchdog) */
-    printf("Sistema Listo. Escribe en la consola.\n");
-    
-    for (;;) {
-        rtems_task_wake_after(RTEMS_MILLISECONDS_TO_TICKS(1000));
+    /* 3. Arrancar la Consola de Usuario */
+    rtems_id console_tid;
+    sc = rtems_task_create(rtems_build_name('C','M','D','T'), 
+                           100, /* Prioridad baja */
+                           RTEMS_MINIMUM_STACK_SIZE * 4,
+                           RTEMS_DEFAULT_MODES, 
+                           RTEMS_DEFAULT_ATTRIBUTES, 
+                           &console_tid);
+    if (sc == RTEMS_SUCCESSFUL) {
+        rtems_task_start(console_tid, Tx_Console_Task, 0);
     }
+
+    /* Init muere o duerme */
+    rtems_task_delete(RTEMS_SELF);
 }
