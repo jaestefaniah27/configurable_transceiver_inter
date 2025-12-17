@@ -74,6 +74,7 @@ static uintptr_t get_intc_addr(void) {
     /* Si no, leer count y calcular: Base + (N * Stride) */
     uint32_t n = Transceiver_GetHardwareCount();
     g_intc_addr = TRANSCEIVER_BASE_START + (n * TRANSCEIVER_STRIDE);
+    printf("Detected %u transceivers. INTC at 0x%08lx\n", n, (unsigned long)g_intc_addr);
     return g_intc_addr;
 }
 
@@ -161,6 +162,7 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
     dev->base_addr = TRANSCEIVER_BASE_START + (id * TRANSCEIVER_STRIDE);
     /* Asignar dirección del INTC calculada */
     dev->intc_base = get_intc_addr();
+    
     
     dev->mask_rx = (1 << (2 * id));
     dev->mask_tx = (1 << (2 * id + 1));
