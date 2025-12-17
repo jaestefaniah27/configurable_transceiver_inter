@@ -165,6 +165,12 @@ void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg);
  */
 void Transceiver_Global_INTC_Init(void);
 
+/**
+ * @brief Obtiene el número de transceptores presentes en el hardware (FPGA).
+ * Lee el registro de identificación del sistema en 0xA0020000.
+ * @return Número de canales disponibles (ej: 14).
+ */
+uint32_t Transceiver_GetHardwareCount(void);
 #ifdef __cplusplus
 }
 #endif
