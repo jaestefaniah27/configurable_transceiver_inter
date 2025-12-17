@@ -7,9 +7,22 @@
 #include <stddef.h>
 #include <rtems.h>
 /* =========================================================================
- * STOP BITS)
+ * BIT ORDER
  * ========================================================================= */
-
+#define TRANSCEIVER_BIT_ORDER_DEFAULT 0 /* LSB First */
+#define TRANSCEIVER_BIT_ORDER_LSB     0 
+#define TRANSCEIVER_BIT_ORDER_MSB     1
+/* =========================================================================
+ * DATA BITS
+ * ========================================================================= */
+#define TRANSCEIVER_DATA_BITS_5     0 
+#define TRANSCEIVER_DATA_BITS_6     1 
+#define TRANSCEIVER_DATA_BITS_7     2 
+#define TRANSCEIVER_DATA_BITS_8     3 
+#define TRANSCEIVER_DATA_BITS_9     4
+/* =========================================================================
+ * STOP BITS
+ * ========================================================================= */
 #define TRANSCEIVER_STOP_BITS_1     0 /* 1 Stop Bit */
 #define TRANSCEIVER_STOP_BITS_1_5   2 /* 1.5 Stop Bits */
 #define TRANSCEIVER_STOP_BITS_2     3 /* 2 Stop Bits */
@@ -165,6 +178,12 @@ void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg);
  */
 void Transceiver_Global_INTC_Init(void);
 
+/**
+ * @brief Obtiene el número de transceptores presentes en el hardware (FPGA).
+ * Lee el registro de identificación del sistema en 0xA0020000.
+ * @return Número de canales disponibles (ej: 14).
+ */
+uint32_t Transceiver_GetHardwareCount(void);
 #ifdef __cplusplus
 }
 #endif

@@ -27,7 +27,11 @@ static Transceiver uarts[NUM_TRANSCEIVERS];
 
 /* Configuración común para todos (115200 8N1) */
 static const Transceiver_Config_t cfg = {
-    .baud = 115200, .data_bits = 3, .parity = 4, .stop_bits = 2, .bit_order = 0
+    .baud = TRANSCEIVER_BAUD_115200, 
+    .data_bits = TRANSCEIVER_DATA_BITS_8, 
+    .parity = TRANSCEIVER_PARITY_NONE, 
+    .stop_bits = TRANSCEIVER_STOP_BITS_1, 
+    .bit_order = TRANSCEIVER_BIT_ORDER_DEFAULT
 };
 
 /* =========================================================================
@@ -179,7 +183,6 @@ rtems_task Init(rtems_task_argument arg) {
     /* 1. Inicializar el INTC Global (Paso Crítico Único) */
     /* Esto habilita el controlador maestro que escucha a las 14 UARTs */
     Transceiver_Global_INTC_Init();
-    printf("INTC Global en 0xA0E00000: Inicializado.\n");
 
     /* 2. Bucle de Inicialización de Transceptores */
     for (int i = 0; i < NUM_TRANSCEIVERS; i++) {
