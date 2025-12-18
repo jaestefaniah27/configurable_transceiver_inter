@@ -8,6 +8,8 @@
 !transceiver_interrupt.c
 !transceiver_interrupt.h
 !mmu_pl_map.c
+!/scripts/
+!/scripts/**
 
 # 3. Importante: No ignorar el propio .gitignore para guardar esta regla
 !.gitignore
