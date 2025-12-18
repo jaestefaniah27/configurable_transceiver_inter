@@ -10,6 +10,12 @@
 !mmu_pl_map.c
 !/scripts/
 !/scripts/**
+!automate_ymodem_update.py
+!init.c
+!make_img.sh
+!waf
+!wscript
+
 
 # 3. Importante: No ignorar el propio .gitignore para guardar esta regla
 !.gitignore
