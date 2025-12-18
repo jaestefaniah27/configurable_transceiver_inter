@@ -246,5 +246,6 @@ proc create_many_transceivers { count ps_name main_xbar_name } {
   puts "   - Count:        $count"
   puts "--------------------------------------------------------"
 }
-#source /home/mpsocv2/CONFIGURABLE_TRANSCEIVER_SERIAL/CONFIGURABLE_TRANSCEIVER_SERIAL.srcs/sources_1/scripts/generate_transceivers.tcl
+#source /home/mpsocv2/quick-start/app/configurable_transceiver_inter/scripts/generate_transceivers.tcl
+
 #create_many_transceivers 14 "zynq_ultra_ps_e_0" "axi_smc"

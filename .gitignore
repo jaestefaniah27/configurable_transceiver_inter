@@ -8,13 +8,14 @@
 !transceiver_interrupt.c
 !transceiver_interrupt.h
 !mmu_pl_map.c
-!/scripts/
-!/scripts/**
+!/hardware/
+!/hardware/**
 !automate_ymodem_update.py
 !init.c
 !make_img.sh
 !waf
 !wscript
+!configurable_transceiver.bif
 
 
 # 3. Importante: No ignorar el propio .gitignore para guardar esta regla
