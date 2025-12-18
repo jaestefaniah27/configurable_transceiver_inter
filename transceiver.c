@@ -5,11 +5,17 @@
 #include <string.h>
 
 /* === Mapa de Memoria Global (Compacto) === */
-#define TRANSCEIVER_BASE_START  0xA0000000
-#define TRANSCEIVER_STRIDE      0x1000      /* 4KB por bloque */
+//#define TRANSCEIVER_BASE_START  0xA0000000
+//#define TRANSCEIVER_STRIDE      0x1000      /* 4KB por bloque */
+
+static uint32_t g_hw_count = 0;
+static uintptr_t g_hw_base = 0;
+static uintptr_t g_hw_stride = 0;
 
 /* Dirección Fija del Bloque de Información del Sistema (Privado del Driver) */
 #define SYS_INFO_ADDR           0xA0020000
+#define GPIO_DATA_CH1          0x00
+#define GPIO_DATA_CH2          0x08
 
 #define IRQ_VECTOR_ID           121
 
@@ -46,7 +52,6 @@
 #define BIT_FRAME_ERROR     (1 << 12)
 #define BIT_TX_RDY          (1 << 13)
 
-#define MAX_TRANSCEIVERS 32
 static Transceiver *g_instances[MAX_TRANSCEIVERS] = { NULL };
 
 /* Cache para la dirección del INTC calculada dinámicamente */
@@ -60,11 +65,28 @@ static inline void reg_write(uintptr_t addr, uint32_t val) {
     *(volatile uint32_t *)addr = val;
 }
 
-/* === NUEVA FUNCIÓN: Obtener número de transceptores desde HW === */
-uint32_t Transceiver_GetHardwareCount(void) {
-    /* Leemos la constante cableada en la FPGA */
-    return reg_read(SYS_INFO_ADDR);
+/* === TODO: RECOMPATIBILIZAR: Descubrimiento de Hardware === */
+uint32_t Transceiver_Hardware_Discover(void) {
+    uint32_t meta_val = reg_read(SYS_INFO_ADDR + GPIO_DATA_CH1);
+    uint32_t base_val = reg_read(SYS_INFO_ADDR + GPIO_DATA_CH2);
+
+    g_hw_count  = meta_val & 0xFFFF;
+    g_hw_stride = (uintptr_t)((meta_val >> 16) & 0xFFFF);
+    g_hw_base   = (uintptr_t)base_val;
+
+    if (g_hw_count == 0 || g_hw_count > MAX_TRANSCEIVERS) return 0;
+    if (g_hw_stride == 0) g_hw_stride = 0x1000;
+
+    g_intc_addr = g_hw_base + (g_hw_count * g_hw_stride);
+
+    TRANS_DEBUG("Detectados: %d | Base: 0x%08lX | INT: 0x%08lX\n", g_hw_count, (unsigned long)g_hw_base, (unsigned long)g_intc_addr);
+    for (uint32_t i = 0; i < g_hw_count; i++) {
+        uintptr_t addr = g_hw_base + (i * g_hw_stride);
+        TRANS_DEBUG("  - Transceptor %d: 0x%08lX\n", i, (unsigned long)addr);
+    }
+    return g_hw_count;
 }
+
 
 /* === Helper Interno: Calcular dirección del INTC === */
 static uintptr_t get_intc_addr(void) {
@@ -72,8 +94,8 @@ static uintptr_t get_intc_addr(void) {
     if (g_intc_addr != 0) return g_intc_addr;
 
     /* Si no, leer count y calcular: Base + (N * Stride) */
-    uint32_t n = Transceiver_GetHardwareCount();
-    g_intc_addr = TRANSCEIVER_BASE_START + (n * TRANSCEIVER_STRIDE);
+    uint32_t n = g_hw_count;
+    g_intc_addr = g_hw_base + (n * g_hw_stride);
     printf("Detected %u transceivers. INTC at 0x%08lx\n", n, (unsigned long)g_intc_addr);
     return g_intc_addr;
 }
@@ -138,6 +160,7 @@ static rtems_isr Master_ISR(void *arg) {
     }
 }
 
+
 /* --- Inicialización Global (Auto-Detect) --- */
 void Transceiver_Global_INTC_Init(void) {
     /* 1. Detectar dirección del INTC automáticamente */
@@ -159,7 +182,7 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
     if (id >= MAX_TRANSCEIVERS) return RTEMS_INVALID_ID;
 
     dev->id = id;
-    dev->base_addr = TRANSCEIVER_BASE_START + (id * TRANSCEIVER_STRIDE);
+    dev->base_addr = g_hw_base + (id * g_hw_stride);
     /* Asignar dirección del INTC calculada */
     dev->intc_base = get_intc_addr();
     
@@ -174,12 +197,12 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
     sc = rtems_semaphore_create(rtems_build_name('T','R','X', '0'+id), 1, 
                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &dev->mutex_id);
     if (sc != RTEMS_SUCCESSFUL) return sc;
-
+    
     sc = rtems_task_create(rtems_build_name('W','K','R', '0'+id), 50, 
-                           RTEMS_MINIMUM_STACK_SIZE * 2,
-                           RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &dev->worker_id);
+    RTEMS_MINIMUM_STACK_SIZE * 2,
+    RTEMS_DEFAULT_MODES, RTEMS_DEFAULT_ATTRIBUTES, &dev->worker_id);
     if (sc != RTEMS_SUCCESSFUL) return sc;
-
+    
     g_instances[id] = dev;
 
     if (cfg) {
@@ -204,7 +227,7 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
 
 /* ... Las funciones Read/SendString siguen igual ... */
 size_t Transceiver_Read(Transceiver *dev, uint8_t *buf, size_t maxlen) {
-    size_t got = 0;
+  size_t got = 0;
     rtems_semaphore_obtain(dev->mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
     while (got < maxlen && dev->rx_count > 0) {
         buf[got++] = dev->rx_buffer[dev->rx_head];
@@ -238,4 +261,10 @@ int Transceiver_SendString(Transceiver *dev, const char *s) {
 void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg) {
     dev->rx_callback = cb;
     dev->rx_callback_arg = arg;
+}
+
+uint32_t Transceiver_INIT(void) {
+    uint32_t count = Transceiver_Hardware_Discover();
+    Transceiver_Global_INTC_Init();
+    return count;
 }

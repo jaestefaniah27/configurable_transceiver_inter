@@ -17,13 +17,14 @@
 #include "transceiver.h"
 
 /* Definiciones del Hardware (Coinciden con tu script TCL) */
-#define NUM_TRANSCEIVERS      14
+// #define NUM_TRANSCEIVERS      14
 // #define TRANSCEIVER_BASE_ADDR 0xA0000000
 // #define TRANSCEIVER_STRIDE    0x100000     /* 1MB por bloque */
 // #define INTC_GLOBAL_BASE      (TRANSCEIVER_BASE_ADDR + (NUM_TRANSCEIVERS * TRANSCEIVER_STRIDE))
 
 /* Objeto global para los 14 transceptores */
-static Transceiver uarts[NUM_TRANSCEIVERS];
+static uint32_t num_transceivers;
+static Transceiver uarts[MAX_TRANSCEIVERS];
 
 /* Configuración común para todos (115200 8N1) */
 static const Transceiver_Config_t cfg = {
@@ -47,7 +48,7 @@ typedef struct {
 } AppLineBuffer;
 
 /* Array estático para guardar el estado de los 14 canales */
-static AppLineBuffer rx_lines[NUM_TRANSCEIVERS]; 
+static AppLineBuffer rx_lines[MAX_TRANSCEIVERS]; 
 
 static void on_rx_data(void *arg) {
     Transceiver *dev = (Transceiver *)arg;
@@ -138,8 +139,8 @@ static rtems_task Tx_Console_Task(rtems_task_argument arg) {
 
         /* --- CASO 1: Enviar a TODOS --- */
         if (strcasecmp(cmd_ptr, "ALL") == 0) {
-            printf("Enviando a las %d UARTs...\n", NUM_TRANSCEIVERS);
-            for (int i = 0; i < NUM_TRANSCEIVERS; i++) {
+            printf("Enviando a las %d UARTs...\n", num_transceivers);
+            for (int i = 0; i < num_transceivers; i++) {
                 Transceiver_SendString(&uarts[i], msg_ptr);
                 // Transceiver_SendString(&uarts[i], "\r\n"); // Opcional: añadir CR/LF
             }
@@ -156,13 +157,13 @@ static rtems_task Tx_Console_Task(rtems_task_argument arg) {
             continue;
         }
 
-        if (target_id >= 0 && target_id < NUM_TRANSCEIVERS) {
+        if (target_id >= 0 && target_id < num_transceivers) {
             /* ¡ENVÍO REAL! */
             Transceiver_SendString(&uarts[target_id], msg_ptr);
             // Transceiver_SendString(&uarts[target_id], "\r\n"); 
             printf("Tx -> UART %d: OK\n", target_id);
         } else {
-            printf("Error: ID %d fuera de rango (0-%d)\n", target_id, NUM_TRANSCEIVERS - 1);
+            printf("Error: ID %d fuera de rango (0-%d)\n", target_id, num_transceivers - 1);
         }
     }
 }
@@ -182,12 +183,10 @@ rtems_task Init(rtems_task_argument arg) {
 
     /* 1. Inicializar el INTC Global (Paso Crítico Único) */
     /* Esto habilita el controlador maestro que escucha a las 14 UARTs */
-    Transceiver_Global_INTC_Init();
-
+    num_transceivers = Transceiver_INIT();
     /* 2. Bucle de Inicialización de Transceptores */
-    for (int i = 0; i < NUM_TRANSCEIVERS; i++) {
+    for (int i = 0; i < num_transceivers; i++) {
         /* Esta función calcula las direcciones automáticamente basándose en el ID */
-        /* Base = 0xA0000000 + (i * 0x10000) */
         sc = Transceiver_Init(&uarts[i], i, &cfg);
 
         if (sc == RTEMS_SUCCESSFUL) {

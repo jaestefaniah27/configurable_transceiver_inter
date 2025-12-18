@@ -6,10 +6,32 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <rtems.h>
+
+#define DEBUG_TRANSCEIVER
+#ifdef DEBUG_TRANSCEIVER
+  #include <stdio.h>
+  #define TRANS_DEBUG(fmt, ...) \
+      do { \
+          printf("[TRANSCEIVER DEBUG] " fmt, ##__VA_ARGS__); \
+          fflush(stdout); \
+      } while (0)
+#else 
+  #define TRANS_DEBUG(fmt, ...) do { } while (0)
+#endif
+
+
+#define MAX_TRANSCEIVERS 14
+/* =========================================================================
+ * DEFAULT CONFIGURATION OPTIONS
+ * ========================================================================= */
+#define TRANSCEIVER_BIT_ORDER_DEFAULT TRANSCEIVER_BIT_ORDER_LSB /* LSB First */
+#define TRANSCEIVER_DATA_BITS_DEFAULT TRANSCEIVER_DATA_BITS_8 /* 8 Data Bits */
+#define TRANSCEIVER_STOP_BITS_DEFAULT TRANSCEIVER_STOP_BITS_1 /* 1 Stop Bit */
+#define TRANSCEIVER_PARITY_DEFAULT    TRANSCEIVER_PARITY_NONE /* No Parity */
+#define TRANSCEIVER_BAUD_DEFAULT      TRANSCEIVER_BAUD_115200 /* 115200 Baud */
 /* =========================================================================
  * BIT ORDER
  * ========================================================================= */
-#define TRANSCEIVER_BIT_ORDER_DEFAULT 0 /* LSB First */
 #define TRANSCEIVER_BIT_ORDER_LSB     0 
 #define TRANSCEIVER_BIT_ORDER_MSB     1
 /* =========================================================================
@@ -173,17 +195,24 @@ int Transceiver_SendString(Transceiver *dev, const char *s);
 void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg);
 
 /**
+ * @brief Función maestra para inicializar todos los transceptores y el INTC global.
+ * Se debe llamar UNA sola vez al inicio, antes de init los transceptores.
+ * @return Número de transceptores detectados.
+ */
+uint32_t Transceiver_INIT(void);
+
+/**
  * @brief Función maestra para inicializar el controlador de interrupciones global.
  * Se debe llamar UNA sola vez al inicio, antes de init los transceptores.
  */
-void Transceiver_Global_INTC_Init(void);
+// void Transceiver_Global_INTC_Init(void);
 
 /**
  * @brief Obtiene el número de transceptores presentes en el hardware (FPGA).
  * Lee el registro de identificación del sistema en 0xA0020000.
  * @return Número de canales disponibles (ej: 14).
  */
-uint32_t Transceiver_GetHardwareCount(void);
+// uint32_t Transceiver_GetHardwareCount(void);
 #ifdef __cplusplus
 }
 #endif
