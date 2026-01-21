@@ -121,7 +121,7 @@
 #define TRANSCEIVER_BAUD_3M        50
 #define TRANSCEIVER_BAUD_3_5M      51
 #define TRANSCEIVER_BAUD_3_6864M   52
-#define TRANSCEIVER_BAUD_4M        53  /* Max Recommended */
+#define TRANSCEIVER_BAUD_4M        53  /* Max */
 
 #ifdef __cplusplus
 extern "C" {

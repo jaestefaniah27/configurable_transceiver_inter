@@ -1,34 +1,78 @@
-# rebuild_all.tcl
-# 1. Configuración de rutas
+# rebuild_all.tcl (ZCU102 + FIFO 9-bit/512 + Fixes Reloj/IRQ)
+# -------------------------------------------------------------------------
 set project_name "zynq_transceiver_system"
 set project_dir  "./vivado_proj"
 set src_dir      "./src"
 set script_dir   "./scripts"
 
-# 2. Crear proyecto (Ajusta la parte según tu placa)
-create_project -force $project_name $project_dir -part xczu3eg-sbva484-1-i
+# 1. Crear proyecto (Part Number ZCU102)
+create_project -force $project_name $project_dir -part xczu9eg-ffvb1156-2-e
 
-# 3. Añadir fuentes RTL (VHDL/Verilog)
-# Asegúrate de que CONFIGURABLE_SERIAL_TOP esté en esta carpeta
+# 2. Añadir fuentes VHDL y Constraints
 add_files [glob $src_dir/*.vhd]
+add_files -fileset constrs_1 $src_dir/zcu102_constraints.xdc
 update_compile_order -fileset sources_1
 
-# 4. Crear el Block Design
+# =========================================================================
+# PASO 2.5: GENERAR EL IP 'fifo_generator_0'
+# =========================================================================
+puts "Generando IP Core: fifo_generator_0 (9-bit, Depth 512)..."
+
+create_ip -name fifo_generator -vendor xilinx.com -library ip -module_name fifo_generator_0
+
+set_property -dict [list \
+    CONFIG.Interface_Type {Native} \
+    CONFIG.Performance_Options {Standard_FIFO} \
+    CONFIG.Input_Data_Width {9} \
+    CONFIG.Input_Depth {512} \
+    CONFIG.Output_Data_Width {9} \
+    CONFIG.Reset_Type {Synchronous_Reset} \
+    CONFIG.Full_Flags_Reset_Value {0} \
+    CONFIG.Use_Dout_Reset {true} \
+] [get_ips fifo_generator_0]
+
+generate_target all [get_ips fifo_generator_0]
+create_ip_run [get_ips fifo_generator_0]
+# =========================================================================
+
+# 3. Crear Block Design
 create_bd_design "system"
 
-# 5. Instanciar y configurar la Zynq UltraScale+
-set ps_e [create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e:3.3 zynq_ultra_ps_e_0]
-# Aplicar configuración por defecto de la placa (Presests)
+# 4. Instanciar Zynq (Versión 3.5 para Vivado 2025.1)
+set ps_e [create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e zynq_ultra_ps_e_0]
+
+# Aplicar presets de ZCU102
 apply_bd_automation -rule xilinx.com:bd_rule:zynq_ultra_ps_e -config {apply_board_preset "1"} $ps_e
 
-# 6. Cargar tu script de transceptores
-source $script_dir/generate_transceivers.tcl
+# 5. CONFIGURACIÓN DE PUERTOS (GP0 para datos, GP1/GP2 OFF, IRQ ON)
+set_property -dict [list \
+    CONFIG.PSU__USE__M_AXI_GP0 {1} \
+    CONFIG.PSU__USE__M_AXI_GP1 {0} \
+    CONFIG.PSU__USE__M_AXI_GP2 {0} \
+    CONFIG.PSU__USE__IRQ0 {1} \
+] $ps_e
 
-# 7. Ejecutar la generación (Ejemplo con 14 transceptores)
-# El script ahora encontrará la Zynq porque la creamos arriba
+# 6. Generar Transceptores (Llamada al script secundario)
+source $script_dir/generate_transceivers.tcl
 create_many_transceivers 14 "zynq_ultra_ps_e_0" "axi_smc"
 
-# 8. Finalizar: Validar y crear Wrapper
+# =========================================================================
+# FIX UNIVERSAL DE RELOJES (Evita errores de pines sin fuente de reloj)
+# =========================================================================
+set pins_to_check [list "maxihpm1_fpd_aclk" "maxihpm0_lpd_aclk"]
+foreach pin_name $pins_to_check {
+    set pin_obj [get_bd_pins -quiet zynq_ultra_ps_e_0/$pin_name]
+    if { $pin_obj ne "" } {
+        connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] $pin_obj
+    }
+}
+
+# 7. Validar y crear Wrapper
 validate_bd_design
 make_wrapper -files [get_files $project_dir/$project_name.srcs/sources_1/bd/system/system.bd] -top
 add_files -norecurse $project_dir/$project_name.srcs/sources_1/bd/system/hdl/system_wrapper.v
+
+puts "----------------------------------------------------------------"
+puts " GENERACIÓN FINALIZADA CON ÉXITO."
+puts " Ya puedes ejecutar 'Generate Bitstream'."
+puts "----------------------------------------------------------------"

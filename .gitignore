@@ -10,6 +10,7 @@
 !mmu_pl_map.c
 !/hardware/
 !/hardware/**
+hardware/vivado_proj
 !automate_ymodem_update.py
 !init.c
 !make_img.sh
