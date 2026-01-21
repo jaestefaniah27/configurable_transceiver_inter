@@ -1,9 +1,11 @@
-# rebuild_all.tcl (ZCU102 + FIFO 9-bit/512 + Fixes Reloj/IRQ)
+# rebuild_all.tcl (Final Correcto: Wrapper Automático + Fixes)
 # -------------------------------------------------------------------------
 set project_name "zynq_transceiver_system"
 set project_dir  "./vivado_proj"
 set src_dir      "./src"
 set script_dir   "./scripts"
+
+set num_transceivers 13
 
 # 1. Crear proyecto (Part Number ZCU102)
 create_project -force $project_name $project_dir -part xczu9eg-ffvb1156-2-e
@@ -38,13 +40,13 @@ create_ip_run [get_ips fifo_generator_0]
 # 3. Crear Block Design
 create_bd_design "system"
 
-# 4. Instanciar Zynq (Versión 3.5 para Vivado 2025.1)
+# 4. Instanciar Zynq (Sin versión fija para máxima compatibilidad)
 set ps_e [create_bd_cell -type ip -vlnv xilinx.com:ip:zynq_ultra_ps_e zynq_ultra_ps_e_0]
 
 # Aplicar presets de ZCU102
 apply_bd_automation -rule xilinx.com:bd_rule:zynq_ultra_ps_e -config {apply_board_preset "1"} $ps_e
 
-# 5. CONFIGURACIÓN DE PUERTOS (GP0 para datos, GP1/GP2 OFF, IRQ ON)
+# 5. CONFIGURACIÓN DE PUERTOS
 set_property -dict [list \
     CONFIG.PSU__USE__M_AXI_GP0 {1} \
     CONFIG.PSU__USE__M_AXI_GP1 {0} \
@@ -52,12 +54,12 @@ set_property -dict [list \
     CONFIG.PSU__USE__IRQ0 {1} \
 ] $ps_e
 
-# 6. Generar Transceptores (Llamada al script secundario)
+# 6. Generar Transceptores (13 canales para coincidir con tu XDC actual)
 source $script_dir/generate_transceivers.tcl
-create_many_transceivers 13 "zynq_ultra_ps_e_0" "axi_smc"
+create_many_transceivers $num_transceivers "zynq_ultra_ps_e_0" "axi_smc"
 
 # =========================================================================
-# FIX UNIVERSAL DE RELOJES (Evita errores de pines sin fuente de reloj)
+# FIX UNIVERSAL DE RELOJES
 # =========================================================================
 set pins_to_check [list "maxihpm1_fpd_aclk" "maxihpm0_lpd_aclk"]
 foreach pin_name $pins_to_check {
@@ -67,10 +69,14 @@ foreach pin_name $pins_to_check {
     }
 }
 
-# 7. Validar y crear Wrapper
+# 7. Validar, crear Wrapper y FIJAR COMO TOP
 validate_bd_design
 make_wrapper -files [get_files $project_dir/$project_name.srcs/sources_1/bd/system/system.bd] -top
 add_files -norecurse $project_dir/$project_name.srcs/sources_1/bd/system/hdl/system_wrapper.v
+
+puts "Configurando system_wrapper como Top Module..."
+set_property top system_wrapper [current_fileset]
+update_compile_order -fileset sources_1
 
 puts "----------------------------------------------------------------"
 puts " GENERACIÓN FINALIZADA CON ÉXITO."
