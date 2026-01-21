@@ -263,7 +263,7 @@ void Transceiver_SetRxCallback(Transceiver *dev, void (*cb)(void *), void *arg) 
     dev->rx_callback_arg = arg;
 }
 
-uint32_t Transceiver_INIT(void) {
+uint32_t Transceiver_Global_INIT(void) {
     uint32_t count = Transceiver_Hardware_Discover();
     Transceiver_Global_INTC_Init();
     return count;

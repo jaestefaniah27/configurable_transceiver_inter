@@ -1,9 +1,9 @@
 /*
  * main.c
- * Sistema Multi-Transceptor (14 Canales) sobre RTEMS.
+ * Sistema Multi-Transceptor sobre RTEMS.
  *
  * Funcionalidad:
- * 1. Inicializa 14 transceptores en paralelo (Base 0xA0000000).
+ * 1. Inicializa transceptores en paralelo (Base 0xA0000000).
  * 2. RX: Muestra por consola lo que llega, indicando de qué UART vino.
  * 3. TX: Permite enviar mensajes a una UART específica desde la consola USB.
  */
@@ -16,13 +16,7 @@
 
 #include "transceiver.h"
 
-/* Definiciones del Hardware (Coinciden con tu script TCL) */
-// #define NUM_TRANSCEIVERS      14
-// #define TRANSCEIVER_BASE_ADDR 0xA0000000
-// #define TRANSCEIVER_STRIDE    0x100000     /* 1MB por bloque */
-// #define INTC_GLOBAL_BASE      (TRANSCEIVER_BASE_ADDR + (NUM_TRANSCEIVERS * TRANSCEIVER_STRIDE))
-
-/* Objeto global para los 14 transceptores */
+/* Objeto global para los transceptores */
 static uint32_t num_transceivers;
 static Transceiver uarts[MAX_TRANSCEIVERS];
 
@@ -183,7 +177,7 @@ rtems_task Init(rtems_task_argument arg) {
 
     /* 1. Inicializar el INTC Global (Paso Crítico Único) */
     /* Esto habilita el controlador maestro que escucha a las 14 UARTs */
-    num_transceivers = Transceiver_INIT();
+    num_transceivers = Transceiver_Global_INIT();
     /* 2. Bucle de Inicialización de Transceptores */
     for (int i = 0; i < num_transceivers; i++) {
         /* Esta función calcula las direcciones automáticamente basándose en el ID */
