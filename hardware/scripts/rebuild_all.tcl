@@ -54,7 +54,7 @@ set_property -dict [list \
 
 # 6. Generar Transceptores (Llamada al script secundario)
 source $script_dir/generate_transceivers.tcl
-create_many_transceivers 14 "zynq_ultra_ps_e_0" "axi_smc"
+create_many_transceivers 13 "zynq_ultra_ps_e_0" "axi_smc"
 
 # =========================================================================
 # FIX UNIVERSAL DE RELOJES (Evita errores de pines sin fuente de reloj)

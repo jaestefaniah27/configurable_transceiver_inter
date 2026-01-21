@@ -54,3 +54,5 @@ set_property IOSTANDARD LVCMOS33 [get_ports {UART_8_* UART_9_* UART_10_* UART_11
 
 set_property PACKAGE_PIN G13 [get_ports {UART_12_TX}] ;# J3.22
 set_property PACKAGE_PIN H13 [get_ports {UART_12_RX}] ;# J3.24
+
+set_property IOSTANDARD LVCMOS33 [get_ports {UART_12_*}]
