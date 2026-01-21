@@ -1,0 +1,10 @@
+//arch = zynqmp; split = false; format = BIN
+the_ROM_image:
+{
+	[bootloader, destination_cpu = a53-0]/home/mpsocv2/quick-start/app/configurable_transceiver_inter/hardware/boot_components/configurable_transcerver_fsbl.elf
+	[pmufw_image]/home/mpsocv2/quick-start/app/configurable_transceiver_inter/hardware/boot_components/pmufw.elf
+	[destination_device = pl]/home/mpsocv2/quick-start/app/configurable_transceiver_inter/hardware/boot_components/conf_transceiver_block_design_wrapper.bit
+	[destination_cpu = a53-0, exception_level = el-3]/home/mpsocv2/quick-start/app/configurable_transceiver_inter/hardware/boot_components/bl31.elf
+	[destination_cpu = a53-0, exception_level = el-2]/home/mpsocv2/quick-start/app/configurable_transceiver_inter/hardware/boot_components/u-boot.elf
+	[load = 0x100000, destination_cpu = a53-0]/home/mpsocv2/quick-start/app/configurable_transceiver_inter/hardware/boot_components/system.dtb
+}
