@@ -24,7 +24,7 @@ create_ip -name fifo_generator -vendor xilinx.com -library ip -module_name fifo_
 
 set_property -dict [list \
     CONFIG.Interface_Type {Native} \
-    CONFIG.Performance_Options {Standard_FIFO} \
+    CONFIG.Performance_Options {First_Word_Fall_Through} \
     CONFIG.Input_Data_Width {9} \
     CONFIG.Input_Depth {512} \
     CONFIG.Output_Data_Width {9} \

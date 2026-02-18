@@ -65,6 +65,7 @@ static void on_rx_data(void *arg) {
                 if (line->idx > 0) { // Solo imprimir si hay algo acumulado
                     line->buf[line->idx] = '\0'; // Null-termination
                     printf("[RX UART %02d]: %s\n", (unsigned int)dev->id, line->buf);
+                    fflush(stdout);
                     line->idx = 0; // Resetear índice para la siguiente frase
                 }
             } 
