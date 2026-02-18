@@ -13,6 +13,7 @@ entity CONFIGURABLE_SERIAL is
     Data_in   : in  std_logic_vector(8 downto 0);  -- Parallel TX byte 
     TX_Send   : in  std_logic;   -- Send
     TX_RDY    : out std_logic;   -- System ready to transmit
+    DE        : out std_logic;   -- Driver Enable
     TD        : out std_logic;   -- Serial Transmission line
 	-- RX
     RD        : in  std_logic;   -- Serial Reception line
@@ -29,7 +30,8 @@ entity CONFIGURABLE_SERIAL is
     stop_bit  : in std_logic_vector(1 downto 0);  -- 1, 1.5 or 2 stop bits
     parity    : in std_logic_vector(2 downto 0);  -- 0→Even, 1→Odd, 2→Mark(=1), 3→Space(=0), 4→parity disabled
     bit_order : in std_logic;                     -- 0→LSB-first (default), 1→MSB-first
-    data_bits  : in std_logic_vector(2 downto 0)); -- 0→5b, 1→6b, 2→7b, 3→8b, 4→9b
+    data_bits : in std_logic_vector(2 downto 0)); -- 0→5b, 1→6b, 2→7b, 3→8b, 4→9b
+     
 
 end CONFIGURABLE_SERIAL;
 
@@ -51,6 +53,7 @@ architecture RTL of CONFIGURABLE_SERIAL is
         bit_order : in std_logic;                     -- 0→LSB-first (default), 1→MSB-first
         data_bits  : in std_logic_vector(2 downto 0); -- 0→5b, 1→6b, 2→7b, 3→8b, 4→9b                
         EOT   : out STD_LOGIC;
+        DE    : out STD_LOGIC;
         TX    : out STD_LOGIC
     );
   end component;
@@ -161,6 +164,7 @@ begin  -- RTL
       bit_order => bit_order,
       data_bits  => data_bits,      
       EOT   => TX_RDY_i,
+      DE    => DE,
       TX    => TD);
 
   Receiver: RX_CONFIGURABLE_SERIAL

@@ -25,11 +25,11 @@ proc create_transceiver_hier { parent_name index } {
   # 2. AXI GPIO Unificado (Dual Channel)
   # Ch1 (Out): Configuración + TX Data | Ch2 (In): Status + RX Data
   set gpio [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 "axi_gpio${s}"]
-  set_property -dict [list CONFIG.C_IS_DUAL {1} CONFIG.C_ALL_OUTPUTS {1} CONFIG.C_GPIO_WIDTH {27} \
+  set_property -dict [list CONFIG.C_IS_DUAL {1} CONFIG.C_ALL_OUTPUTS {1} CONFIG.C_GPIO_WIDTH {28} \
                            CONFIG.C_ALL_INPUTS_2 {1} CONFIG.C_GPIO2_WIDTH {14}] $gpio
 
   # 3. Conexiones Internas
-  connect_bd_net [get_bd_pins ${gpio}/gpio_io_o] [get_bd_pins ${rtl}/PS_SERIAL_CONFIG_DataRead_ErrorOk_Send_DataIn]
+  connect_bd_net [get_bd_pins ${gpio}/gpio_io_o] [get_bd_pins ${rtl}/PS_SERIAL_CONFIG]
   connect_bd_net [get_bd_pins ${rtl}/PS_out]     [get_bd_pins ${gpio}/gpio2_io_i]
 
   # 4. Interfaz AXI
@@ -45,8 +45,12 @@ proc create_transceiver_hier { parent_name index } {
   # 6. Pines UART (Físicos)
   create_bd_pin -dir I RD
   create_bd_pin -dir O TD
+  create_bd_pin -dir O DE
+  create_bd_pin -dir O SLO
   connect_bd_net [get_bd_pins RD] [get_bd_pins ${rtl}/RD]
   connect_bd_net [get_bd_pins TD] [get_bd_pins ${rtl}/TD]
+  connect_bd_net [get_bd_pins DE] [get_bd_pins ${rtl}/DE]
+  connect_bd_net [get_bd_pins SLO] [get_bd_pins ${rtl}/SLO]
 
   # 7. Interrupción
   create_bd_pin -dir O -from 1 -to 0 irq_raw
@@ -208,6 +212,10 @@ proc create_many_transceivers { count ps_name main_xbar_name } {
         set_property name "UART_${i}_RX" [get_bd_ports RD_0]
         make_bd_pins_external [get_bd_pins ${cell}/TD]
         set_property name "UART_${i}_TX" [get_bd_ports TD_0]
+        make_bd_pins_external [get_bd_pins ${cell}/DE]
+        set_property name "UART_${i}_DE" [get_bd_ports DE_0]
+        make_bd_pins_external [get_bd_pins ${cell}/SLO]
+        set_property name "UART_${i}_SLO" [get_bd_ports SLO_0]
     } else {
         # Transceptor Phantom (sin salida física, RX tied high)
         set tie [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 "tie_idle_${i}"]

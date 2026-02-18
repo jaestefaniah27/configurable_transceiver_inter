@@ -35,6 +35,7 @@ entity TX_CONFIGURABLE_SERIAL is
         bit_order : in std_logic;                     -- 0→LSB-first (default), 1→MSB-first
         data_bits  : in std_logic_vector(2 downto 0); -- 0→5b, 1→6b, 2→7b, 3→8b, 4→9b                
         EOT   : out STD_LOGIC;
+        DE    : out STD_LOGIC;
         TX    : out STD_LOGIC
     );
 end TX_CONFIGURABLE_SERIAL;
@@ -73,7 +74,7 @@ architecture Behavioral of TX_CONFIGURABLE_SERIAL is
     signal en_NCO, rst_NCO, rst_NCO_mux, half_mode_NCO : std_logic;
     signal en_data_count, rst_data_count, en_stop_bits, rst_stop_bits : std_logic;
     -- outputs intermedios
-    signal EOT_temp, TX_temp : std_logic := '1';
+    signal EOT_temp, TX_temp, DE_temp : std_logic;
     signal TX_MUX, TX_MUX_LSB, TX_MUX_MSB, TX_MUX_MSB_5, TX_MUX_MSB_6, TX_MUX_MSB_7, TX_MUX_MSB_8, TX_MUX_MSB_9 : std_logic;
     signal TX_MUX_PARITY, PARITY_RAW  : std_logic;
 begin
@@ -167,6 +168,7 @@ begin
         -- default assignments
         next_state <= current_state;
         EOT_temp <= '0';
+        DE_temp <= '1';
         TX_temp <= '1';
         en_data_count <= '0';
         rst_data_count <= '0';
@@ -178,6 +180,7 @@ begin
         case current_state is
             when Idle =>
                 EOT_temp <= '1';
+                DE_temp  <= '0';
                 en_NCO <= '0';
                 if Start = '1' then
                     next_state <= StartBit;
@@ -221,6 +224,7 @@ begin
                 if stop_bits_reg = stop_bit then
                     next_state <= Idle;
                     EOT_temp <= '1';
+                    DE <= '0';
                     rst_NCO <= '0';
                     rst_stop_bits <= '1';
                 end if;
