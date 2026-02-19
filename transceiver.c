@@ -32,7 +32,7 @@ static uintptr_t g_hw_stride = 0;
 #define INTC_MER   0x1C
 
 /* === Mapeo de Bits CANAL 1 (Output -> FPGA) === */
-/* [Order(1) | DataBits(3) | Parity(3) | Stop(2) | Baud(6) | Read(1) | ErrOK(1) | Send(1) | DataIn(9)] */
+/* [Order(1) | DataBits(3) | Parity(3) | Stop(2) | Baud(6) | Read(1) | ErrOK(1) | Send(1) | DataIn(9)] | SLO(1) */
 #define MASK_DATA_IN        0x000001FF
 #define BIT_TX_SEND         (1 << 9)
 #define BIT_ERROR_OK        (1 << 10)
@@ -42,6 +42,7 @@ static uintptr_t g_hw_stride = 0;
 #define SHIFT_PARITY        20
 #define SHIFT_DATA_BITS     23
 #define BIT_ORDER           (1 << 26)
+#define BIT_SLO             (1 << 27) /* Bit para activar modo SLO */
 
 /* === Mapeo de Bits CANAL 2 (Input <- FPGA) === */
 /* [TxRdy(1) | FrameErr(1) | ParErr(1) | Full(1) | Empty(1) | DataOut(9)] */
@@ -216,6 +217,7 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
         val |= ((cfg->stop_bits & 0x3) << SHIFT_STOP);
         val |= ((cfg->parity & 0x7) << SHIFT_PARITY);
         val |= ((cfg->data_bits & 0x7) << SHIFT_DATA_BITS);
+        if (cfg->slo_mode) val |= BIT_SLO;
         if (cfg->bit_order) val |= BIT_ORDER;
 
         reg_write(dev->base_addr + REG_CH1_DATA, val);

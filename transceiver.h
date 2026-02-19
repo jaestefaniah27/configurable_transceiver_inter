@@ -25,10 +25,11 @@
  * DEFAULT CONFIGURATION OPTIONS
  * ========================================================================= */
 #define TRANSCEIVER_BIT_ORDER_DEFAULT TRANSCEIVER_BIT_ORDER_LSB /* LSB First */
-#define TRANSCEIVER_DATA_BITS_DEFAULT TRANSCEIVER_DATA_BITS_8 /* 8 Data Bits */
-#define TRANSCEIVER_STOP_BITS_DEFAULT TRANSCEIVER_STOP_BITS_1 /* 1 Stop Bit */
-#define TRANSCEIVER_PARITY_DEFAULT    TRANSCEIVER_PARITY_NONE /* No Parity */
-#define TRANSCEIVER_BAUD_DEFAULT      TRANSCEIVER_BAUD_115200 /* 115200 Baud */
+#define TRANSCEIVER_DATA_BITS_DEFAULT TRANSCEIVER_DATA_BITS_8   /* 8 Data Bits */
+#define TRANSCEIVER_STOP_BITS_DEFAULT TRANSCEIVER_STOP_BITS_1   /* 1 Stop Bit */
+#define TRANSCEIVER_PARITY_DEFAULT    TRANSCEIVER_PARITY_NONE   /* No Parity */
+#define TRANSCEIVER_BAUD_DEFAULT      TRANSCEIVER_BAUD_115200   /* 115200 Baud */
+#define TRANSCEIVER_SLO_DEFAULT       TRANSCEIVER_SLO_OFF       /* SLO Disabled */
 /* =========================================================================
  * BIT ORDER
  * ========================================================================= */
@@ -56,6 +57,11 @@
 #define TRANSCEIVER_PARITY_MARK    2  /* Mark (Bit de paridad siempre 1) */
 #define TRANSCEIVER_PARITY_SPACE   3  /* Space (Bit de paridad siempre 0) */
 #define TRANSCEIVER_PARITY_NONE    4  /* Sin Paridad (Desactivada) */
+/* =========================================================================
+ * SLO MODE
+ * ========================================================================= */
+#define TRANSCEIVER_SLO_ON        1  /* Modo SLOW Activado: Mejora EMI */
+#define TRANSCEIVER_SLO_OFF       0  /* Modo SLOW Desactivado */
 /* =========================================================================
  * BAUD RATE SELECTORS (NCO LUT INDICES)
  * ========================================================================= */
@@ -134,6 +140,7 @@ typedef struct {
     uint32_t parity;
     uint32_t stop_bits;
     uint32_t bit_order;
+    uint32_t slo_mode;
 } Transceiver_Config_t;
 
 /* === Objeto Transceiver (Handle) === */
