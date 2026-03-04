@@ -26,7 +26,8 @@ static const Transceiver_Config_t cfg = {
     .data_bits = TRANSCEIVER_DATA_BITS_8, 
     .parity = TRANSCEIVER_PARITY_NONE, 
     .stop_bits = TRANSCEIVER_STOP_BITS_1, 
-    .bit_order = TRANSCEIVER_BIT_ORDER_DEFAULT
+    .bit_order = TRANSCEIVER_BIT_ORDER_DEFAULT,
+    .slo_mode = TRANSCEIVER_SLO_ON
 };
 
 /* =========================================================================

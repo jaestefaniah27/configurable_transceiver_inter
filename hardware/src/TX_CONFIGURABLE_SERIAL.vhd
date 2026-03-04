@@ -180,7 +180,6 @@ begin
         case current_state is
             when Idle =>
                 EOT_temp <= '1';
-                DE_temp  <= '0';
                 en_NCO <= '0';
                 if Start = '1' then
                     next_state <= StartBit;
@@ -190,6 +189,7 @@ begin
 
             when StartBit =>
                 TX_temp <= '0';  -- start bit = 0
+                DE_temp <= '1';
                 if NCO_tick = '1' then
                     next_state <= SendData;
                 end if;
@@ -197,6 +197,7 @@ begin
             when SendData =>
                 en_data_count <= NCO_tick;
                 TX_temp <= TX_MUX;
+                DE_temp <= '1';
                 -- comparar con data_count_reg (4 bits) a data_bits_5_to_9
                 if (data_count_reg = data_bits_5_to_9) then
                 en_data_count <= '0';  
@@ -212,6 +213,7 @@ begin
             
             when ParityBit =>
                 TX_temp <= TX_MUX_PARITY;
+                DE_temp <= '1';
                 if NCO_tick = '1' then
                     next_state <= StopBit;
                     TX_temp <= '1'; -- stop bit is typically '1'                
@@ -221,10 +223,10 @@ begin
                 en_stop_bits <= NCO_tick;
                 half_mode_NCO <= '1';
                 TX_temp <= '1';
+                DE_temp <= '1';
                 if stop_bits_reg = stop_bit then
                     next_state <= Idle;
                     EOT_temp <= '1';
-                    DE <= '0';
                     rst_NCO <= '0';
                     rst_stop_bits <= '1';
                 end if;
@@ -246,5 +248,6 @@ begin
     -- outputs
     TX <= TX_temp;
     EOT <= EOT_temp;
+    DE <= DE_temp;
 
 end Behavioral;
