@@ -6,7 +6,7 @@ set src_dir      "./src"
 set script_dir   "./scripts"
 
 # El número de canales a instanciar (13 físicos + 1 phantom si usas 14)
-set num_transceivers 14
+set num_transceivers 4
 
 puts "----------------------------------------------------------------"
 puts " CREANDO PROYECTO: $project_name"
