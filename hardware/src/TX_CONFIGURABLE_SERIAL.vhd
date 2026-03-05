@@ -168,7 +168,7 @@ begin
         -- default assignments
         next_state <= current_state;
         EOT_temp <= '0';
-        DE_temp <= '1';
+        DE_temp <= '0';
         TX_temp <= '1';
         en_data_count <= '0';
         rst_data_count <= '0';
@@ -184,7 +184,8 @@ begin
                 if Start = '1' then
                     next_state <= StartBit;
                     rst_data_count <= '1';  
-                    rst_NCO <= '0';                                   
+                    rst_NCO <= '0'; 
+                    DE_temp <= '1';                                  
                 end if;
 
             when StartBit =>
