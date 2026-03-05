@@ -119,11 +119,12 @@ static rtems_task Tx_Console_Task(rtems_task_argument arg) {
     printf("\n=======================================================\n");
     printf(" CONSOLA DE CONTROL MULTI-TRANSCEPTOR\n");
     printf("-------------------------------------------------------\n");
-    printf(" Formato: <ID> <MENSAJE>\n");
+    printf(" Formato: <ID> <MENSAJE> | <ID> SLO ON | <ID> SLO OFF\n");
     printf(" Ejemplos:\n");
     printf("   '0 Hola'      -> Envia 'Hola' por UART 0\n");
-    printf("   '12 Status'   -> Envia 'Status' por UART 12\n");
     printf("   'ALL Reset'   -> Envia 'Reset' por TODAS las UARTs\n");
+    printf("   '2 SLO ON'    -> Activa el modo Slow Rate en UART 2\n");
+    printf("   'ALL SLO OFF' -> Desactiva el modo Slow en TODAS\n");
     printf("=======================================================\n\n");
 
     for (;;) {
@@ -137,33 +138,42 @@ static rtems_task Tx_Console_Task(rtems_task_argument arg) {
             continue;
         }
 
-        /* Limpiar salto de línea al final */
-        input_buf[strcspn(input_buf, "\r")] = 0;
-
         /* Ignorar líneas vacías */
         if (strlen(input_buf) == 0) continue;
 
         /* Separar ID del Mensaje */
-        cmd_ptr = strtok(input_buf, " "); // Primer token (ID)
-        msg_ptr = strtok(NULL, "");       // Resto de la línea (Mensaje)
+        cmd_ptr = strtok(input_buf, " "); // Primer token (ID o ALL)
+        msg_ptr = strtok(NULL, "");       // Resto de la línea (Mensaje o Comando)
 
         if (msg_ptr == NULL) {
-            printf("Error: Falta el mensaje. Uso: <ID> <MENSAJE>\n");
+            printf("Error: Falta el mensaje o comando.\n");
             continue;
         }
 
         /* --- CASO 1: Enviar a TODOS --- */
         if (strcasecmp(cmd_ptr, "ALL") == 0) {
-            printf("Enviando a las %d UARTs...\n", num_transceivers);
-            for (int i = 0; i < num_transceivers; i++) {
-                Transceiver_SendString(&uarts[i], msg_ptr);
-                // Transceiver_SendString(&uarts[i], "\r\n"); // Opcional: añadir CR/LF
+            if (strcasecmp(msg_ptr, "SLO ON") == 0) {
+                printf("Activando SLO en todas las UARTs...\n");
+                for (int i = 0; i < num_transceivers; i++) {
+                    Transceiver_Init(&uarts[i], i, &cfg_slo_on);
+                    Transceiver_SetRxCallback(&uarts[i], on_rx_data, &uarts[i]);
+                }
+            } else if (strcasecmp(msg_ptr, "SLO OFF") == 0) {
+                printf("Desactivando SLO en todas las UARTs...\n");
+                for (int i = 0; i < num_transceivers; i++) {
+                    Transceiver_Init(&uarts[i], i, &cfg_slo_off);
+                    Transceiver_SetRxCallback(&uarts[i], on_rx_data, &uarts[i]);
+                }
+            } else {
+                printf("Enviando a las %d UARTs...\n", num_transceivers);
+                for (int i = 0; i < num_transceivers; i++) {
+                    Transceiver_SendString(&uarts[i], msg_ptr);
+                }
             }
             continue;
         }
 
         /* --- CASO 2: Enviar a ID específico --- */
-        /* Validar que el ID sea un número */
         char *endptr;
         target_id = strtoul(cmd_ptr, &endptr, 10);
 
@@ -173,10 +183,23 @@ static rtems_task Tx_Console_Task(rtems_task_argument arg) {
         }
 
         if (target_id >= 0 && target_id < num_transceivers) {
-            /* ¡ENVÍO REAL! */
-            Transceiver_SendString(&uarts[target_id], msg_ptr);
-            // Transceiver_SendString(&uarts[target_id], "\r\n"); 
-            printf("Tx -> UART %d: OK\n", target_id);
+            
+            /* Interceptar comandos de configuración de Slew Rate */
+            if (strcasecmp(msg_ptr, "SLO ON") == 0) {
+                Transceiver_Init(&uarts[target_id], target_id, &cfg_slo_on);
+                Transceiver_SetRxCallback(&uarts[target_id], on_rx_data, &uarts[target_id]);
+                printf("SLO -> UART %d: ON\n", target_id);
+            } 
+            else if (strcasecmp(msg_ptr, "SLO OFF") == 0) {
+                Transceiver_Init(&uarts[target_id], target_id, &cfg_slo_off);
+                Transceiver_SetRxCallback(&uarts[target_id], on_rx_data, &uarts[target_id]);
+                printf("SLO -> UART %d: OFF\n", target_id);
+            } 
+            else {
+                /* ¡ENVÍO REAL! */
+                Transceiver_SendString(&uarts[target_id], msg_ptr);
+                printf("Tx -> UART %d: OK\n", target_id);
+            }
         } else {
             printf("Error: ID %d fuera de rango (0-%d)\n", target_id, num_transceivers - 1);
         }
