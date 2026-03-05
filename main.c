@@ -27,9 +27,28 @@ static const Transceiver_Config_t cfg = {
     .parity = TRANSCEIVER_PARITY_NONE, 
     .stop_bits = TRANSCEIVER_STOP_BITS_1, 
     .bit_order = TRANSCEIVER_BIT_ORDER_DEFAULT,
+    .slo_mode = TRANSCEIVER_SLO_DEFAULT
+};
+
+/* Configuración común para SLO ON (115200 8N1) */
+static const Transceiver_Config_t cfg_slo_on = {
+    .baud = TRANSCEIVER_BAUD_115200, 
+    .data_bits = TRANSCEIVER_DATA_BITS_8, 
+    .parity = TRANSCEIVER_PARITY_NONE, 
+    .stop_bits = TRANSCEIVER_STOP_BITS_1, 
+    .bit_order = TRANSCEIVER_BIT_ORDER_DEFAULT,
     .slo_mode = TRANSCEIVER_SLO_ON
 };
 
+/* Configuración común para SLO OFF (115200 8N1) */
+static const Transceiver_Config_t cfg_slo_off = {
+    .baud = TRANSCEIVER_BAUD_115200, 
+    .data_bits = TRANSCEIVER_DATA_BITS_8, 
+    .parity = TRANSCEIVER_PARITY_NONE, 
+    .stop_bits = TRANSCEIVER_STOP_BITS_1, 
+    .bit_order = TRANSCEIVER_BIT_ORDER_DEFAULT,
+    .slo_mode = TRANSCEIVER_SLO_OFF
+};
 /* =========================================================================
  * 1. CALLBACK DE RECEPCIÓN (Se ejecuta cuando llega algo a CUALQUIER UART)
  * ========================================================================= */
@@ -175,11 +194,11 @@ rtems_task Init(rtems_task_argument arg) {
     extern void mmu_map_pl_axi_early(void);
     mmu_map_pl_axi_early();
 
-    printf("\n=== ARRANQUE SISTEMA ZCU102 (14 UARTs) ===\n");
-
+    
     /* 1. Inicializar el INTC Global (Paso Crítico Único) */
     /* Esto habilita el controlador maestro que escucha a las 14 UARTs */
     num_transceivers = Transceiver_Global_INIT();
+    printf("\n=== ARRANQUE SISTEMA ZCU102 (%d UARTs) ===\n", num_transceivers);
     /* 2. Bucle de Inicialización de Transceptores */
     for (int i = 0; i < num_transceivers; i++) {
         /* Esta función calcula las direcciones automáticamente basándose en el ID */
