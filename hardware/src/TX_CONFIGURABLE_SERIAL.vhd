@@ -1,23 +1,6 @@
 ----------------------------------------------------------------------------------
--- Company: 
--- Engineer: 
--- 
--- Create Date: 11/17/2025 12:45:20 PM
--- Design Name: 
 -- Module Name: TX_CONFIGURABLE_SERIAL - Behavioral
--- Project Name: 
--- Target Devices: 
--- Tool Versions: 
--- Description: 
--- 
--- Dependencies: 
--- 
--- Revision:
--- Revision 0.01 - File Created
--- Additional Comments:
--- 
 ----------------------------------------------------------------------------------
-
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -25,18 +8,18 @@ use IEEE.NUMERIC_STD.ALL;
 
 entity TX_CONFIGURABLE_SERIAL is
     Port (
-        Clk   : in  STD_LOGIC;
-        Reset : in  STD_LOGIC;
-        Start : in  STD_LOGIC;
-        Data  : in  STD_LOGIC_VECTOR (8 downto 0);
-        baud_sel  : in std_logic_vector(5 downto 0); -- configurable to 36 standard bps
-        stop_bit  : in std_logic_vector(2 downto 0);  -- 1 (010), 1.5(011) or 2(100) stop bits ( 2, 3 or 4 half ticks)
-        parity    : in std_logic_vector(2 downto 0);  -- 0→Even, 1→Odd, 2→Mark(=1), 3→Space(=0), 4→parity disabled
-        bit_order : in std_logic;                     -- 0→LSB-first (default), 1→MSB-first
-        data_bits  : in std_logic_vector(2 downto 0); -- 0→5b, 1→6b, 2→7b, 3→8b, 4→9b                
-        EOT   : out STD_LOGIC;
-        DE    : out STD_LOGIC;
-        TX    : out STD_LOGIC
+        Clk       : in  STD_LOGIC;
+        Reset     : in  STD_LOGIC;
+        Start     : in  STD_LOGIC;
+        Data      : in  STD_LOGIC_VECTOR (8 downto 0);
+        baud_sel  : in std_logic_vector(5 downto 0);
+        stop_bit  : in std_logic_vector(2 downto 0);
+        parity    : in std_logic_vector(2 downto 0);
+        bit_order : in std_logic;
+        data_bits : in std_logic_vector(2 downto 0);                
+        EOT       : out STD_LOGIC;
+        DE        : out STD_LOGIC;
+        TX        : out STD_LOGIC
     );
 end TX_CONFIGURABLE_SERIAL;
 
@@ -48,32 +31,35 @@ architecture Behavioral of TX_CONFIGURABLE_SERIAL is
   );
     port(
     clk       : in  std_logic;
-    rst       : in  std_logic;                 -- activo a '0'
+    rst       : in  std_logic;
     en        : in  std_logic;
-    half_mode : in  std_logic;                 -- '0' -> inc normal, '1' -> inc_half (2x baud)
-    baud_sel  : in  std_logic_vector(5 downto 0); -- valor decimal del baud
+    half_mode : in  std_logic;
+    baud_sel  : in  std_logic_vector(5 downto 0);
     tick      : out std_logic
   );
   end component;
 
-    -- FSM
-    --type estados is (Idle, StartBit, SendData, ParityBit, StopBit);
-    type estados is (Idle, StartBit, SendData, StopBit, ParityBit);
-    
+    -- FSM actualizadas con PreDE y PostDE
+    type estados is (Idle, PreDE, StartBit, SendData, ParityBit, StopBit, PostDE);
     signal current_state, next_state: estados;
 
-    -- counters
-    signal data_count_reg, data_count_next  : std_logic_vector(3 downto 0); -- 4 bits to count 0..9 databits
-    signal stop_bits_reg, stop_bits_next    : std_logic_vector(2 downto 0); --  1 (010), 1.5(011) or 2(100) stop bits ( 2, 3 or 4 half ticks)
-    --signal data_count : std_logic_vector(3 downto 0); -- LSB for MUX 1..9
-    -- data_bits 0..4 to 5..9
+    -- Counters existentes
+    signal data_count_reg, data_count_next  : std_logic_vector(3 downto 0);
+    signal stop_bits_reg, stop_bits_next    : std_logic_vector(2 downto 0);
+    
+    -- Counter de Delay añadido para los 100us (10,000 ciclos a 100MHz)
+    constant DELAY_CYCLES : integer := 10000;
+    signal delay_cnt_reg, delay_cnt_next : unsigned(13 downto 0);
+    signal en_delay, rst_delay : std_logic;
+
     signal data_bits_5_to_9 : std_logic_vector(3 downto 0);
-    -- NCO ticks
     signal NCO_tick : std_logic;
-    -- control signals NCO, data_count, stop_bits counters
+    
+    -- Control signals
     signal en_NCO, rst_NCO, rst_NCO_mux, half_mode_NCO : std_logic;
     signal en_data_count, rst_data_count, en_stop_bits, rst_stop_bits : std_logic;
-    -- outputs intermedios
+    
+    -- Outputs intermedios
     signal EOT_temp, TX_temp, DE_temp : std_logic;
     signal TX_MUX, TX_MUX_LSB, TX_MUX_MSB, TX_MUX_MSB_5, TX_MUX_MSB_6, TX_MUX_MSB_7, TX_MUX_MSB_8, TX_MUX_MSB_9 : std_logic;
     signal TX_MUX_PARITY, PARITY_RAW  : std_logic;
@@ -90,28 +76,37 @@ begin
         baud_sel  => baud_sel,
         tick      => NCO_tick);
                                
-    -- Data_count and stop_bits reg
+    -- Proceso síncrono para contadores
     process(Clk, Reset)
     begin
         if Reset = '0' then
             data_count_reg <= (others => '0');
-            stop_bits_reg <= (others => '0');            
+            stop_bits_reg <= (others => '0');
+            delay_cnt_reg <= (others => '0');            
         elsif rising_edge(Clk) then
             if rst_data_count = '1' then
                 data_count_reg <= (others => '0');
             elsif en_data_count = '1' then
                 data_count_reg <= data_count_next;
             end if;
+            
             if rst_stop_bits = '1' then 
                 stop_bits_reg <= (others => '0');
             elsif en_stop_bits = '1' then
                 stop_bits_reg <= stop_bits_next;
+            end if;
+            
+            if rst_delay = '1' then
+                delay_cnt_reg <= (others => '0');
+            elsif en_delay = '1' then
+                delay_cnt_reg <= delay_cnt_next;
             end if;
         end if;
     end process;
 
     data_count_next <= std_logic_vector(unsigned(data_count_reg) + 1);
     stop_bits_next <= std_logic_vector(unsigned(stop_bits_reg) + 1);
+    delay_cnt_next <= delay_cnt_reg + 1;
     
     -- MUX TX (LSB first)
     with data_count_reg select
@@ -145,15 +140,10 @@ begin
                         
     -- PARITY MUX
     PARITY_RAW <=
-        -- 5 bits
         (Data(0) xor Data(1) xor Data(2) xor Data(3) xor Data(4)) when data_bits="000" else
-        -- 6 bits
         (Data(0) xor Data(1) xor Data(2) xor Data(3) xor Data(4) xor Data(5)) when data_bits="001" else
-        -- 7 bits
         (Data(0) xor Data(1) xor Data(2) xor Data(3) xor Data(4) xor Data(5) xor Data(6)) when data_bits="010" else
-        -- 8 bits
         (Data(0) xor Data(1) xor Data(2) xor Data(3) xor Data(4) xor Data(5) xor Data(6) xor Data(7)) when data_bits="011" else
-        -- 9 bits
         (Data(0) xor Data(1) xor Data(2) xor Data(3) xor Data(4) xor Data(5) xor Data(6) xor Data(7) xor Data(8));
         
     with parity select 
@@ -162,10 +152,10 @@ begin
                             '1'             when "010",
                             '0'             when others;
                                                 
-    -- FSM combinational: calcula next_state y señales de salida temporales
-    process(current_state, Start, Data, data_count_reg, stop_bits_reg, NCO_tick, data_bits_5_to_9, parity, stop_bit, TX_MUX)
+    -- FSM combinational
+    process(current_state, Start, Data, data_count_reg, stop_bits_reg, delay_cnt_reg, NCO_tick, data_bits_5_to_9, parity, stop_bit, TX_MUX, TX_MUX_PARITY)
     begin
-        -- default assignments
+        -- Asignaciones por defecto
         next_state <= current_state;
         EOT_temp <= '0';
         DE_temp <= '0';
@@ -177,19 +167,32 @@ begin
         en_NCO <= '1';
         half_mode_NCO <= '0';
         rst_NCO <= '1';
+        en_delay <= '0';
+        rst_delay <= '0';
+        
         case current_state is
             when Idle =>
                 EOT_temp <= '1';
                 en_NCO <= '0';
                 if Start = '1' then
-                    next_state <= StartBit;
-                    rst_data_count <= '1';  
-                    rst_NCO <= '0'; 
+                    next_state <= PreDE;
+                    rst_delay <= '1';
                     DE_temp <= '1';                                  
                 end if;
 
+            when PreDE =>
+                DE_temp <= '1';
+                en_delay <= '1';
+                en_NCO <= '0';
+                -- Esperar (DELAY_CYCLES - 1) garantiza exactamente 10000 periodos al transicionar
+                if delay_cnt_reg = to_unsigned(DELAY_CYCLES - 1, 14) then
+                    next_state <= StartBit;
+                    rst_data_count <= '1';
+                    rst_NCO <= '0'; -- Reinicia el NCO justo antes de transmitir el StartBit
+                end if;
+
             when StartBit =>
-                TX_temp <= '0';  -- start bit = 0
+                TX_temp <= '0'; 
                 DE_temp <= '1';
                 if NCO_tick = '1' then
                     next_state <= SendData;
@@ -199,13 +202,11 @@ begin
                 en_data_count <= NCO_tick;
                 TX_temp <= TX_MUX;
                 DE_temp <= '1';
-                -- comparar con data_count_reg (4 bits) a data_bits_5_to_9
                 if (data_count_reg = data_bits_5_to_9) then
-                en_data_count <= '0';  
+                    en_data_count <= '0';  
                     if (parity = "100") then
                         next_state <= StopBit;
-                        TX_temp <= '1'; -- stop bit is typically '1'
-                        --rst_NCO <= '0';
+                        TX_temp <= '1'; 
                     else
                         next_state <= ParityBit;
                         TX_temp <= TX_MUX_PARITY;
@@ -217,7 +218,7 @@ begin
                 DE_temp <= '1';
                 if NCO_tick = '1' then
                     next_state <= StopBit;
-                    TX_temp <= '1'; -- stop bit is typically '1'                
+                    TX_temp <= '1';                 
                 end if;
 
             when StopBit =>
@@ -226,27 +227,34 @@ begin
                 TX_temp <= '1';
                 DE_temp <= '1';
                 if stop_bits_reg = stop_bit then
-                    next_state <= Idle;
-                    EOT_temp <= '1';
-                    rst_NCO <= '0';
+                    next_state <= PostDE;
+                    rst_delay <= '1';
                     rst_stop_bits <= '1';
+                end if;
+
+            when PostDE =>
+                DE_temp <= '1';
+                TX_temp <= '1';
+                en_delay <= '1';
+                en_NCO <= '0'; -- El NCO no es necesario en esta fase, podemos deshabilitarlo
+                if delay_cnt_reg = to_unsigned(DELAY_CYCLES - 1, 14) then
+                    next_state <= Idle;
                 end if;
 
         end case;
     end process;
 
-    -- State register (synchronous): actualiza current_state y genera resets de 1 ciclo
+    -- State register
     process(Clk, Reset)
     begin
         if Reset = '0' then
             current_state <= Idle;
         elsif rising_edge(Clk) then
-            -- update state
             current_state <= next_state;
         end if;
     end process;
 
-    -- outputs
+    -- Outputs
     TX <= TX_temp;
     EOT <= EOT_temp;
     DE <= DE_temp;

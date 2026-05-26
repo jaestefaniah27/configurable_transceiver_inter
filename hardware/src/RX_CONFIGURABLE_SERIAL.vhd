@@ -109,7 +109,7 @@ begin
     Store_out <= Store_out_temp;
     
     -- regs
-    process(Clk, Reset)
+    process(Clk, Reset, ERROR_OK)
     begin
         if Reset = '0' then
             data_count_reg <= (others => '0');
@@ -161,7 +161,7 @@ begin
 
 
     -- FSM combinational: calcula next_state y señales de salida temporales
-    process(current_state, LineRD_in, data_count_reg, NCO_tick, data_bits_5_to_9, EXPECTED_PARITY, par_error_reg, frame_error_reg)
+    process(current_state, LineRD_in, data_count_reg, NCO_tick, data_bits_5_to_9, EXPECTED_PARITY, par_error_reg, frame_error_reg, parity)
     begin
         -- default assignments
         next_state <= current_state;
@@ -189,7 +189,11 @@ begin
             when StartBit =>
                 half_mode_NCO <= '1';
                 if NCO_tick = '1' then
-                    next_state <= RcvData;
+                    if LineRD_in = '0' then
+                        next_state <= RcvData;
+                    else
+                        next_state <= Idle; -- False start bit (glitch), abort
+                    end if;
                 end if;
 
             when RcvData =>
