@@ -17,6 +17,7 @@ hardware/vivado_proj
 !waf
 !wscript
 !configurable_transceiver.bif
+!generate_boot.sh
 
 
 # 3. Importante: No ignorar el propio .gitignore para guardar esta regla
