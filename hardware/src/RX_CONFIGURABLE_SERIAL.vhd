@@ -237,5 +237,8 @@ begin
             current_state <= next_state;
         end if;
     end process;
+    
+    FRAME_ERROR <= frame_error_reg;
+    PAR_ERROR <= par_error_reg;
 
 end Behavioral;
