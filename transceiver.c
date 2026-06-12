@@ -130,10 +130,13 @@ static rtems_task Rx_Worker_Task(rtems_task_argument arg) {
             }
             rtems_semaphore_release(dev->mutex_id);
 
+            rtems_interrupt_level level;
+            rtems_interrupt_local_disable(level);
             uint32_t current_ctrl = reg_read(reg_out);
             reg_write(reg_out, current_ctrl | BIT_DATA_READ);
-            for(volatile int k=0; k<10; k++); 
+            for(volatile int k=0; k<50; k++); 
             reg_write(reg_out, current_ctrl & ~BIT_DATA_READ);
+            rtems_interrupt_local_enable(level);
         }
 
         if (dev->rx_callback) dev->rx_callback(dev->rx_callback_arg);
@@ -151,12 +154,33 @@ static rtems_isr Master_ISR(void *arg) {
     /* Recorremos hasta el máximo posible o guardamos 'count' en una variable global */
     for (int i = 0; i < MAX_TRANSCEIVERS; i++) {
         Transceiver *dev = g_instances[i];
-        if (!dev) continue; /* Saltamos los no inicializados */
+        if (!dev) continue;
 
         if (pending & dev->mask_rx) {
             reg_write(intc + INTC_IAR, dev->mask_rx);
             reg_write(intc + INTC_CIE, dev->mask_rx);
             rtems_event_send(dev->worker_id, RTEMS_EVENT_0);
+        }
+
+        if (pending & dev->mask_tx) {
+            if (dev->tx_count > 0) {
+                uint8_t byte = dev->tx_buffer[dev->tx_head];
+                dev->tx_head = (dev->tx_head + 1) % dev->tx_buf_size;
+                dev->tx_count--;
+                
+                uintptr_t reg_out = dev->base_addr + REG_CH1_DATA;
+                uint32_t val = reg_read(reg_out);
+                val &= ~(MASK_DATA_IN | BIT_TX_SEND | BIT_DATA_READ);
+                val |= (byte & MASK_DATA_IN);
+                
+                reg_write(reg_out, val);
+                reg_write(reg_out, val | BIT_TX_SEND);
+                for(volatile int k=0; k<50; k++); 
+                reg_write(reg_out, val & ~BIT_TX_SEND);
+            } else {
+                dev->tx_busy = false;
+            }
+            reg_write(intc + INTC_IAR, dev->mask_tx);
         }
     }
 }
@@ -195,8 +219,17 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
     dev->rx_buffer = malloc(dev->rx_buf_size);
     dev->rx_head = dev->rx_tail = dev->rx_count = 0;
 
+    dev->tx_buf_size = 4096;
+    dev->tx_buffer = malloc(dev->tx_buf_size);
+    dev->tx_head = dev->tx_tail = dev->tx_count = 0;
+    dev->tx_busy = false;
+
     sc = rtems_semaphore_create(rtems_build_name('T','R','X', '0'+id), 1, 
                                 RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &dev->mutex_id);
+    if (sc != RTEMS_SUCCESSFUL) return sc;
+    
+    sc = rtems_semaphore_create(rtems_build_name('T','X','M', '0'+id), 1, 
+                                RTEMS_PRIORITY | RTEMS_BINARY_SEMAPHORE, 0, &dev->tx_mutex_id);
     if (sc != RTEMS_SUCCESSFUL) return sc;
     
     sc = rtems_task_create(rtems_build_name('W','K','R', '0'+id), 50, 
@@ -224,6 +257,9 @@ rtems_status_code Transceiver_Init(Transceiver *dev, uint32_t id, const Transcei
     }
 
     sc = rtems_task_start(dev->worker_id, Rx_Worker_Task, (rtems_task_argument)dev);
+    
+    intc_enable_line(dev, dev->mask_tx);
+    
     return sc;
 }
 
@@ -241,22 +277,44 @@ size_t Transceiver_Read(Transceiver *dev, uint8_t *buf, size_t maxlen) {
 }
 
 int Transceiver_SendString(Transceiver *dev, const char *s) {
-    uintptr_t reg_out = dev->base_addr + REG_CH1_DATA;
-    uintptr_t reg_in  = dev->base_addr + REG_CH2_DATA;
-
+    rtems_semaphore_obtain(dev->tx_mutex_id, RTEMS_WAIT, RTEMS_NO_TIMEOUT);
+    
     while (*s) {
-        while ((reg_read(reg_in) & BIT_TX_RDY) == 0);
-
+        if (dev->tx_count < dev->tx_buf_size) {
+            dev->tx_buffer[dev->tx_tail] = *s;
+            dev->tx_tail = (dev->tx_tail + 1) % dev->tx_buf_size;
+            
+            rtems_interrupt_level level;
+            rtems_interrupt_local_disable(level);
+            dev->tx_count++;
+            rtems_interrupt_local_enable(level);
+        } else {
+            break; /* Buffer lleno. En prod bloquearíamos, aquí salimos p/seguridad */
+        }
+        s++;
+    }
+    
+    rtems_interrupt_level level;
+    rtems_interrupt_local_disable(level);
+    if (!dev->tx_busy && dev->tx_count > 0) {
+        dev->tx_busy = true;
+        uint8_t byte = dev->tx_buffer[dev->tx_head];
+        dev->tx_head = (dev->tx_head + 1) % dev->tx_buf_size;
+        dev->tx_count--;
+        
+        uintptr_t reg_out = dev->base_addr + REG_CH1_DATA;
         uint32_t val = reg_read(reg_out);
         val &= ~(MASK_DATA_IN | BIT_TX_SEND | BIT_DATA_READ);
-        val |= (*s & MASK_DATA_IN);
+        val |= (byte & MASK_DATA_IN);
         
         reg_write(reg_out, val);
         reg_write(reg_out, val | BIT_TX_SEND);
-        for(volatile int k=0; k<20; k++);
+        for(volatile int k=0; k<50; k++); 
         reg_write(reg_out, val & ~BIT_TX_SEND);
-        s++;
     }
+    rtems_interrupt_local_enable(level);
+    
+    rtems_semaphore_release(dev->tx_mutex_id);
     return 0;
 }
 

@@ -174,6 +174,15 @@ typedef struct {
     void (*rx_callback)(void *arg);
     void *rx_callback_arg;
 
+    /* -- Software State (TX) -- */
+    rtems_id tx_mutex_id;       /* ID del mutex para el buffer TX */
+    uint8_t *tx_buffer;         /* Buffer circular de transmisión */
+    size_t tx_buf_size;
+    volatile size_t tx_head;
+    size_t tx_tail;
+    volatile size_t tx_count;
+    volatile bool tx_busy;      /* Bandera de hardware ocupado transmitiendo */
+
 } Transceiver;
 
 /* === API Pública === */
